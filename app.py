@@ -117,22 +117,44 @@ elif page=='Inversiones':
             valuations['value']=pd.to_numeric(valuations.value);valuations['valuation_date']=pd.to_datetime(valuations.valuation_date);valuations=valuations.sort_values(['investment_id','valuation_date'])
         summary=[]
         for _,inv in investments.iterrows():
-            history=valuations[valuations.investment_id==inv.id].copy() if not valuations.empty else pd.DataFrame()
-            if history.empty:first=latest=previous=float(inv.balance);days=0
-            else:first=float(history.iloc[0].value);latest=float(history.iloc[-1].value);previous=float(history.iloc[-2].value) if len(history)>1 else first;days=max(0,(history.iloc[-1].valuation_date-history.iloc[0].valuation_date).days)
-            abs_change=latest-previous;pct_change=(latest/previous-1) if previous else pd.NA;total_return=(latest/first-1) if first else pd.NA;annualized=((latest/first)**(365/days)-1) if days>0 and first>0 and latest>=0 else pd.NA
-            projected=latest*(1+annualized) if pd.notna(annualized) else pd.NA;inflation_value=latest*(1+inflation_rate);cetes_value=latest*(1+cetes_rate);summary.append({'Inversión':inv.label,'Valor actual':latest,'Cambio último':abs_change,'% último':pct_change,'Rendimiento total':total_return,'Proyección anual':annualized,'Proyección 12m':projected,'Referencia inflación 12m':inflation_value,'Diferencia vs. inflación':projected-inflation_value if pd.notna(projected) else pd.NA,'Referencia CETES 12m':cetes_value,'Diferencia vs. CETES':projected-cetes_value if pd.notna(projected) else pd.NA})
+            history=valuations[valuations['investment_id']==inv['id']].copy() if not valuations.empty else pd.DataFrame()
+            if history.empty:first=latest=float(inv['balance']);previous=pd.NA;days=0
+            else:first=float(history.iloc[0]['value']);latest=float(history.iloc[-1]['value']);previous=float(history.iloc[-2]['value']) if len(history)>1 else pd.NA;days=max(0,(history.iloc[-1]['valuation_date']-history.iloc[0]['valuation_date']).days)
+            abs_change=latest-previous if pd.notna(previous) else pd.NA;pct_change=(latest/previous-1) if pd.notna(previous) and previous else pd.NA;total_return=(latest/first-1) if len(history)>1 and first else pd.NA;annualized=((latest/first)**(365/days)-1) if len(history)>1 and days>0 and first>0 and latest>=0 else pd.NA
+            projected=latest*(1+annualized) if pd.notna(annualized) else pd.NA;inflation_value=latest*(1+inflation_rate);cetes_value=latest*(1+cetes_rate);summary.append({'Inversión':inv['label'],'Valuaciones':len(history),'Valor actual':latest,'Cambio último':abs_change,'% último':pct_change,'Rendimiento total':total_return,'Proyección anual':annualized,'Proyección 12m':projected,'Referencia inflación 12m':inflation_value,'Diferencia vs. inflación':projected-inflation_value if pd.notna(projected) else pd.NA,'Referencia CETES 12m':cetes_value,'Diferencia vs. CETES':projected-cetes_value if pd.notna(projected) else pd.NA})
         summary=pd.DataFrame(summary);st.metric('Patrimonio invertido',money(summary['Valor actual'].sum()));display=summary.copy()
         for col in ['Valor actual','Cambio último','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else money(x))
         for col in ['% último','Rendimiento total','Proyección anual']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else f'{x:.2%}')
         st.dataframe(display,hide_index=True,use_container_width=True)
         with st.expander('Registrar nueva valuación'):
+            valuation_investments={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
             with st.form('valuation'):
-                v1,v2=st.columns(2);selected_label=v1.selectbox('Inversión',investments.label.tolist());vdate=v2.date_input('Fecha de valuación');value=v1.number_input('Valor actual',min_value=0.0,step=100.0);notes=v2.text_input('Nota opcional');save_value=st.form_submit_button('Guardar valuación',type='primary')
+                v1,v2=st.columns(2);selected_label=v1.selectbox('Inversión',list(valuation_investments));vdate=v2.date_input('Fecha de valuación');value=v1.number_input('Valor actual',min_value=0.0,step=100.0);notes=v2.text_input('Nota opcional');save_value=st.form_submit_button('Guardar valuación',type='primary')
             if save_value:
-                inv_id=int(investments.loc[investments.label==selected_label,'id'].iloc[0])
+                inv_id=valuation_investments[selected_label]
                 try:insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':vdate.isoformat(),'value':value,'notes':notes});st.success('Valuación registrada');st.rerun()
                 except Exception as e:st.error('No se pudo guardar. Si ya existe una valuación de ese día, usa otra fecha. '+str(e))
+        if not valuations.empty:
+            with st.expander('Consultar y corregir histórico de valuaciones'):
+                history_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
+                history_label=st.selectbox('Consultar inversión',list(history_options),key='history_investment');history_id=history_options[history_label]
+                selected_history=valuations[valuations['investment_id']==history_id].sort_values('valuation_date',ascending=False).copy()
+                if selected_history.empty:st.info('Esta inversión todavía no tiene valuaciones registradas.')
+                else:
+                    history_view=selected_history[['valuation_date','value','notes']].rename(columns={'valuation_date':'Fecha','value':'Valor','notes':'Nota'});history_view['Fecha']=history_view['Fecha'].dt.strftime('%Y-%m-%d');history_view['Valor']=history_view['Valor'].map(money);st.dataframe(history_view,hide_index=True,use_container_width=True)
+                    record_options={f"{row['valuation_date'].strftime('%Y-%m-%d')} · {money(row['value'])} · ID {int(row['id'])}":int(row['id']) for _,row in selected_history.iterrows()};record_label=st.selectbox('Registro a corregir',list(record_options),key='history_record');record_id=record_options[record_label];record=selected_history[selected_history['id']==record_id].iloc[0]
+                    with st.form('edit_valuation'):
+                        e1,e2=st.columns(2);edit_date=e1.date_input('Fecha corregida',value=record['valuation_date'].date());edit_value=e2.number_input('Valor corregido',min_value=0.0,value=float(record['value']),step=100.0);edit_notes=st.text_input('Nota',value='' if pd.isna(record['notes']) else str(record['notes']));save_edit=st.form_submit_button('Guardar corrección',type='primary')
+                    if save_edit:
+                        try:client().table('investment_valuations').update({'valuation_date':edit_date.isoformat(),'value':edit_value,'notes':edit_notes}).eq('id',record_id).execute();st.success('Valuación corregida.');st.rerun()
+                        except Exception as e:st.error('No se pudo corregir. Verifica que no exista otra valuación de esa inversión en la misma fecha. '+str(e))
+                    with st.form('delete_valuation'):
+                        confirm_value_delete=st.checkbox('Confirmo que quiero eliminar esta valuación.');delete_value=st.form_submit_button('Eliminar valuación')
+                    if delete_value:
+                        if not confirm_value_delete:st.error('Marca la casilla de confirmación antes de eliminar.')
+                        else:
+                            try:client().table('investment_valuations').delete().eq('id',record_id).execute();st.success('Valuación eliminada.');st.rerun()
+                            except Exception as e:st.error('No se pudo eliminar la valuación. '+str(e))
         if not valuations.empty:
             chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_layout(dragmode='zoom',hovermode='x unified');fig.update_xaxes(tickformat='%d %b %Y',fixedrange=False);fig.update_yaxes(tickprefix='$',tickformat=',.0f',fixedrange=False);st.caption('Acerca o aleja con la rueda del mouse sobre la gráfica. Haz doble clic para restablecer la vista.');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
         with st.expander('Eliminar inversión'):
