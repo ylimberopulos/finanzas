@@ -71,9 +71,10 @@ def load_compiled_monthly(path: str, year: int = 2026) -> pd.DataFrame:
         if month_name not in raw.columns: continue
         values = pd.to_numeric(raw[month_name], errors="coerce").fillna(0)
         valid = (~detail.str.lower().isin(["", "gasto mensual", "total acumulados"])) & (values != 0)
-        for cat, value in zip(category[valid], values[valid]):
+        for cat, subcat, value in zip(category[valid], detail[valid], values[valid]):
             records.append({"year": year, "month": month_num, "month_name": month_name,
-                            "category": cat, "amount": abs(float(value)), "source": "Consolidado"})
+                            "category": cat, "subcategory": subcat or "Sin detalle",
+                            "amount": abs(float(value)), "source": "Consolidado"})
     return pd.DataFrame(records)
 
 def load_extraordinary(path: str) -> pd.DataFrame:
