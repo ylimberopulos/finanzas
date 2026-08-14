@@ -25,6 +25,11 @@ def normalize_subcategory(value: str) -> str:
         "Ana Limpieza": "Aseo Ana",
         "Ropa y Accesorios Mariana": "Ropa & Accesorios Mariana",
         "Ropa y Accesorios Yani": "Ropa & Accesorios Yani",
+        "Pintada Pelo": "Pintada de Pelo",
+        "Inscripción/Utiles": "Inscripción",
+        "Inscripcion/Utiles": "Inscripción",
+        "Inscripcion": "Inscripción",
+        "Taller Natacion": "Taller Natación",
     }
     return aliases.get(text, text or "Sin detalle")
 
@@ -79,7 +84,7 @@ def load_compiled_monthly(path: str, year: int = 2026) -> pd.DataFrame:
     for month_name, month_num in MONTHS_ES.items():
         if month_name not in raw.columns: continue
         values = pd.to_numeric(raw[month_name], errors="coerce").fillna(0)
-        valid = (~detail.str.lower().isin(["", "gasto mensual", "total acumulados"])) & (values != 0)
+        valid = (~detail.str.lower().isin(["", "gasto mensual", "total acumulados"])) & (~detail.str.fullmatch(r"[\d.,]+")) & (values != 0)
         for cat, subcat, value in zip(category[valid], detail[valid], values[valid]):
             records.append({"year": year, "month": month_num, "month_name": month_name,
                             "category": cat, "subcategory": normalize_subcategory(subcat),
