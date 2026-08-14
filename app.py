@@ -112,7 +112,7 @@ elif page=='Extraordinarios':
 elif page=='Inversiones':
     st.title('Inversiones y rendimientos');st.caption('Registra cada inversión y actualiza su valuación cuando quieras');investments=pd.DataFrame(fetch('investments'));valuations=pd.DataFrame(fetch('investment_valuations'))
     if not investments.empty:
-        investments['balance']=pd.to_numeric(investments.balance);investments['label']=investments.institution.fillna('')+' · '+investments.product.fillna('');inflation,cetes=st.columns(2);inflation_rate=inflation.number_input('Inflación anual de referencia %',min_value=0.0,value=4.0,step=0.1)/100;cetes_rate=cetes.number_input('CETES anual de referencia %',min_value=0.0,value=8.0,step=0.1)/100
+        investments['balance']=pd.to_numeric(investments['balance']);investments['label']=investments['institution'].astype('string').fillna('')+' · '+investments['product'].astype('string').fillna('');inflation,cetes=st.columns(2);inflation_rate=inflation.number_input('Inflación anual de referencia %',min_value=0.0,value=4.0,step=0.1)/100;cetes_rate=cetes.number_input('CETES anual de referencia %',min_value=0.0,value=8.0,step=0.1)/100
         if not valuations.empty:
             valuations['value']=pd.to_numeric(valuations.value);valuations['valuation_date']=pd.to_datetime(valuations.valuation_date);valuations=valuations.sort_values(['investment_id','valuation_date'])
         summary=[]
