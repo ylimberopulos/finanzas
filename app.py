@@ -3,6 +3,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_extraordinary,load_compiled_monthly
 from src.storage import fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
+APP_VERSION='2026.08.14-categorias-v2'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -22,10 +23,8 @@ def authenticate():
 def budget_data():return load_budget(str(DATA/'ppto_2026_morus.xlsx'))
 @st.cache_data
 def extraordinary_data():return load_extraordinary(str(DATA/'gastos_no_programados.xlsx'))
-@st.cache_data
 def initial_movements():
     p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
-@st.cache_data
 def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
 def money(v):return f'${v:,.2f}' if abs(v-round(v))>.001 else f'${v:,.0f}'
 def style(fig):
@@ -67,7 +66,7 @@ def all_categories_chart(view):
     data=view.groupby('category',as_index=False).amount.sum().sort_values('amount');fig=px.bar(data,x='amount',y='category',orientation='h',title='Gasto total por todas las categorías',text=[money(v) for v in data.amount],color='amount',color_continuous_scale=['#BFDBFE','#2563EB'],labels={'amount':'Gasto','category':'Categoría'});fig.update_xaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(textposition='outside');fig.update_layout(coloraxis_showscale=False,margin=dict(l=10,r=90,t=52,b=10),height=max(450,36*len(data)));return style(fig)
 authenticate()
 with st.sidebar:
-    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider();st.caption('🔒 Datos privados')
+    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider();st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
     if st.button('Cerrar sesión',use_container_width=True):st.session_state.clear();st.rerun()
 monthly=analytical_monthly();budget=budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
 if page=='Resumen':
