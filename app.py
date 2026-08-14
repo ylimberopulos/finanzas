@@ -2,11 +2,11 @@ from pathlib import Path
 from io import BytesIO
 import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, streamlit as st
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
-from src.storage import fetch,insert_one,insert_rows
+from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
 APP_VERSION='2026.08.14-presupuesto-v1'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
-PLOT_CONFIG={'displaylogo':False,'responsive':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
+PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
 def authenticate():
     expected=st.secrets.get('APP_PASSWORD','')
@@ -134,7 +134,16 @@ elif page=='Inversiones':
                 try:insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':vdate.isoformat(),'value':value,'notes':notes});st.success('Valuación registrada');st.rerun()
                 except Exception as e:st.error('No se pudo guardar. Si ya existe una valuación de ese día, usa otra fecha. '+str(e))
         if not valuations.empty:
-            chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_yaxes(tickprefix='$',tickformat=',.0f');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+            chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_layout(dragmode='zoom',hovermode='x unified');fig.update_xaxes(tickformat='%d %b %Y',fixedrange=False);fig.update_yaxes(tickprefix='$',tickformat=',.0f',fixedrange=False);st.caption('Acerca o aleja con la rueda del mouse sobre la gráfica. Haz doble clic para restablecer la vista.');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+        with st.expander('Eliminar inversión'):
+            delete_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
+            with st.form('delete_investment'):
+                selected_delete=st.selectbox('Inversión a eliminar',list(delete_options));confirm_delete=st.checkbox('Entiendo que también se eliminará todo su historial de valuaciones.');delete_sent=st.form_submit_button('Eliminar definitivamente')
+            if delete_sent:
+                if not confirm_delete:st.error('Marca la casilla de confirmación antes de eliminar.')
+                else:
+                    try:client().table('investments').delete().eq('id',delete_options[selected_delete]).execute();st.success('Inversión e historial eliminados.');st.rerun()
+                    except Exception as e:st.error('No se pudo eliminar la inversión. '+str(e))
     with st.expander('Agregar inversión',expanded=investments.empty):
         with st.form('investment'):
             c1,c2=st.columns(2);institution=c1.text_input('Institución');product=c2.text_input('Producto');owner=c1.text_input('Titular');asset=c2.selectbox('Tipo de activo',['Efectivo','Deuda','Renta variable','Fondo','Inmueble','Otro']);balance=c1.number_input('Valor inicial',min_value=0.0);rate=c2.number_input('Tasa anual esperada %',min_value=0.0);opened=st.date_input('Fecha inicial');sent=st.form_submit_button('Guardar',type='primary')
