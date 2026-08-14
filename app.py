@@ -33,6 +33,10 @@ def initial_movements():
     p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
 def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
 def money(v):return f'${v:,.2f}' if abs(v-round(v))>.001 else f'${v:,.0f}'
+def change_color(v):
+    try:n=float(str(v).replace('$','').replace(',',''))
+    except (TypeError,ValueError):return ''
+    return 'color:#15803D;font-weight:700' if n>0 else ('color:#DC2626;font-weight:700' if n<0 else '')
 def style(fig):
     fig.update_layout(font=dict(color=NAVY),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',margin=dict(l=10,r=10,t=52,b=10),legend_title_text='');fig.update_xaxes(gridcolor=GRID);fig.update_yaxes(gridcolor=GRID);return fig
 def db_movements():
@@ -125,7 +129,7 @@ elif page=='Inversiones':
         summary=pd.DataFrame(summary);st.metric('Patrimonio invertido',money(summary['Valor actual'].sum()));display=summary.copy()
         for col in ['Valor actual','Cambio último','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else money(x))
         for col in ['% último','Rendimiento total','Proyección anual']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else f'{x:.2%}')
-        st.dataframe(display,hide_index=True,use_container_width=True)
+        st.dataframe(display.style.map(change_color,subset=['Cambio último']),hide_index=True,use_container_width=True);st.caption('“Cambio último” y “% último” comparan las dos valuaciones más recientes registradas para cada inversión.')
         with st.expander('Registrar nueva valuación'):
             valuation_investments={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
             with st.form('valuation'):
@@ -159,7 +163,7 @@ elif page=='Inversiones':
                                 st.success('Histórico actualizado.');st.rerun()
                             except Exception as e:st.error('No se pudieron guardar los cambios. Verifica que no haya dos valuaciones de la misma inversión en la misma fecha. '+str(e))
         if not valuations.empty:
-            chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_layout(dragmode='zoom',hovermode='x unified');fig.update_xaxes(tickformat='%d %b %Y',fixedrange=False);fig.update_yaxes(tickprefix='$',tickformat=',.0f',fixedrange=False);st.caption('Acerca o aleja con la rueda del mouse sobre la gráfica. Haz doble clic para restablecer la vista.');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+            chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_layout(dragmode='zoom',hovermode='x unified');fig.update_xaxes(tickformat='%d %b %Y',tickmode='linear',dtick=86400000,fixedrange=False);fig.update_yaxes(tickprefix='$',tickformat=',.0f',fixedrange=False);st.caption('Acerca o aleja con la rueda del mouse sobre la gráfica. Haz doble clic para restablecer la vista.');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
         with st.expander('Eliminar inversión'):
             delete_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
             with st.form('delete_investment'):
