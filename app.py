@@ -1,9 +1,10 @@
 from pathlib import Path
+from io import BytesIO
 import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, streamlit as st
-from src.importers import parse_alzex,load_budget,load_extraordinary,load_compiled_monthly
+from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.14-categorias-v2'
+APP_VERSION='2026.08.14-presupuesto-v1'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -21,6 +22,11 @@ def authenticate():
     st.stop()
 @st.cache_data
 def budget_data():return load_budget(str(DATA/'ppto_2026_morus.xlsx'))
+@st.cache_data
+def budget_template():
+    sample=pd.DataFrame({'Categoría':['Hogar','Salud','Transporte','Compras personales','Ciencias'],'Monto':[35000,12000,9000,6000,10000]});buffer=BytesIO()
+    with pd.ExcelWriter(buffer,engine='openpyxl') as writer:sample.to_excel(writer,index=False,sheet_name='Presupuesto mensual')
+    return buffer.getvalue()
 @st.cache_data
 def extraordinary_data():return load_extraordinary(str(DATA/'gastos_no_programados.xlsx'))
 def initial_movements():
@@ -66,9 +72,21 @@ def all_categories_chart(view):
     data=view.groupby('category',as_index=False).amount.sum().sort_values('amount');fig=px.bar(data,x='amount',y='category',orientation='h',title='Gasto total por todas las categorías',text=[money(v) for v in data.amount],color='amount',color_continuous_scale=['#BFDBFE','#2563EB'],labels={'amount':'Gasto','category':'Categoría'});fig.update_xaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(textposition='outside');fig.update_layout(coloraxis_showscale=False,margin=dict(l=10,r=90,t=52,b=10),height=max(450,36*len(data)));return style(fig)
 authenticate()
 with st.sidebar:
-    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider();st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
+    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
+    with st.expander('Cargar presupuesto mensual'):
+        st.download_button('Descargar plantilla Excel',budget_template(),file_name='plantilla_presupuesto_mensual.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
+        upload_key=st.session_state.get('budget_upload_key',0);budget_file=st.file_uploader('Excel con Categoría y Monto',type=['xlsx'],key=f'budget_file_{upload_key}')
+        if budget_file:
+            try:
+                custom_budget=load_simple_budget(budget_file.getvalue());st.session_state['custom_budget']=custom_budget.to_dict('records');st.success(f'{len(custom_budget)} categorías cargadas.')
+            except Exception as e:st.error(str(e))
+        if st.session_state.get('custom_budget') and st.button('Restaurar presupuesto original',use_container_width=True):
+            st.session_state.pop('custom_budget',None);st.session_state['budget_upload_key']=upload_key+1;st.rerun()
+        if st.session_state.get('custom_budget'):st.caption('Fuente activa: archivo cargado')
+        else:st.caption('Fuente activa: presupuesto original')
+    st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
     if st.button('Cerrar sesión',use_container_width=True):st.session_state.clear();st.rerun()
-monthly=analytical_monthly();budget=budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
+monthly=analytical_monthly();budget=pd.DataFrame(st.session_state['custom_budget']) if st.session_state.get('custom_budget') else budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
 if page=='Resumen':
     st.title('Resumen financiero');st.caption('Dónde estás parado, qué se está desviando y dónde hay fugas');view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
     left,right=st.columns([1.35,1])
