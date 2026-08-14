@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 from io import BytesIO
+import unicodedata
 import pandas as pd
 
 ALIASES = {
@@ -74,6 +75,28 @@ def load_budget(path: str) -> pd.DataFrame:
     raw["detail"] = raw["detail"].fillna("").astype(str).str.strip()
     raw["monthly_budget"] = pd.to_numeric(raw["monthly_budget"], errors="coerce")
     return raw.dropna(subset=["monthly_budget"]).query("monthly_budget > 0 and detail != ''")
+
+def load_simple_budget(data: bytes) -> pd.DataFrame:
+    raw = pd.read_excel(BytesIO(data), sheet_name=0)
+    if raw.shape[1] < 2:
+        raise ValueError("El archivo debe contener dos columnas: Categoría y Monto.")
+    def clean_header(value):
+        text = unicodedata.normalize("NFKD", str(value).strip().lower())
+        return "".join(c for c in text if not unicodedata.combining(c))
+    headers = [clean_header(c) for c in raw.columns[:2]]
+    if "categoria" not in headers[0] or "monto" not in headers[1]:
+        raise ValueError("La primera columna debe llamarse Categoría y la segunda Monto.")
+    out = raw.iloc[:, :2].copy()
+    out.columns = ["category", "monthly_budget"]
+    out["category"] = out["category"].map(normalize_category)
+    out["monthly_budget"] = pd.to_numeric(out["monthly_budget"], errors="coerce")
+    out = out.dropna(subset=["category", "monthly_budget"])
+    out = out[(out["category"].astype(str).str.strip() != "") & (out["monthly_budget"] >= 0)]
+    if out.empty:
+        raise ValueError("El archivo no contiene categorías con montos válidos.")
+    out = out.groupby("category", as_index=False)["monthly_budget"].sum()
+    out["detail"] = "Presupuesto mensual cargado"
+    return out[["category", "detail", "monthly_budget"]]
 
 def load_compiled_monthly(path: str, year: int = 2026) -> pd.DataFrame:
     raw = pd.read_excel(path, sheet_name=0)
