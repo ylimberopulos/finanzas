@@ -141,20 +141,23 @@ elif page=='Inversiones':
                 selected_history=valuations[valuations['investment_id']==history_id].sort_values('valuation_date',ascending=False).copy()
                 if selected_history.empty:st.info('Esta inversión todavía no tiene valuaciones registradas.')
                 else:
-                    history_view=selected_history[['valuation_date','value','notes']].rename(columns={'valuation_date':'Fecha','value':'Valor','notes':'Nota'});history_view['Fecha']=history_view['Fecha'].dt.strftime('%Y-%m-%d');history_view['Valor']=history_view['Valor'].map(money);st.dataframe(history_view,hide_index=True,use_container_width=True)
-                    record_options={f"{row['valuation_date'].strftime('%Y-%m-%d')} · {money(row['value'])} · ID {int(row['id'])}":int(row['id']) for _,row in selected_history.iterrows()};record_label=st.selectbox('Registro a corregir',list(record_options),key='history_record');record_id=record_options[record_label];record=selected_history[selected_history['id']==record_id].iloc[0]
-                    with st.form('edit_valuation'):
-                        e1,e2=st.columns(2);edit_date=e1.date_input('Fecha corregida',value=record['valuation_date'].date());edit_value=e2.number_input('Valor corregido',min_value=0.0,value=float(record['value']),step=100.0);edit_notes=st.text_input('Nota',value='' if pd.isna(record['notes']) else str(record['notes']));save_edit=st.form_submit_button('Guardar corrección',type='primary')
-                    if save_edit:
-                        try:client().table('investment_valuations').update({'valuation_date':edit_date.isoformat(),'value':edit_value,'notes':edit_notes}).eq('id',record_id).execute();st.success('Valuación corregida.');st.rerun()
-                        except Exception as e:st.error('No se pudo corregir. Verifica que no exista otra valuación de esa inversión en la misma fecha. '+str(e))
-                    with st.form('delete_valuation'):
-                        confirm_value_delete=st.checkbox('Confirmo que quiero eliminar esta valuación.');delete_value=st.form_submit_button('Eliminar valuación')
-                    if delete_value:
-                        if not confirm_value_delete:st.error('Marca la casilla de confirmación antes de eliminar.')
+                    history_edit=selected_history[['id','valuation_date','value','notes']].rename(columns={'id':'ID','valuation_date':'Fecha','value':'Valor','notes':'Nota'});history_edit['Fecha']=history_edit['Fecha'].dt.date;history_edit['Nota']=history_edit['Nota'].fillna('');history_edit['Eliminar']=False
+                    st.caption('Haz doble clic en una celda para modificarla. Después pulsa “Guardar cambios”.')
+                    edited_history=st.data_editor(history_edit,hide_index=True,use_container_width=True,num_rows='fixed',disabled=['ID'],column_config={'ID':st.column_config.NumberColumn('ID',format='%d'),'Fecha':st.column_config.DateColumn('Fecha',format='YYYY-MM-DD',required=True),'Valor':st.column_config.NumberColumn('Valor',format='$ %.2f',min_value=0.0,required=True),'Nota':st.column_config.TextColumn('Nota'),'Eliminar':st.column_config.CheckboxColumn('Eliminar')},key=f'history_editor_{history_id}')
+                    confirm_value_delete=st.checkbox('Confirmo la eliminación de los renglones marcados.',key=f'confirm_history_delete_{history_id}');save_history=st.button('Guardar cambios',type='primary',key=f'save_history_{history_id}')
+                    if save_history:
+                        rows_to_delete=edited_history[edited_history['Eliminar']==True]
+                        if not rows_to_delete.empty and not confirm_value_delete:st.error('Marcaste valuaciones para eliminar. Confirma su eliminación antes de guardar.')
                         else:
-                            try:client().table('investment_valuations').delete().eq('id',record_id).execute();st.success('Valuación eliminada.');st.rerun()
-                            except Exception as e:st.error('No se pudo eliminar la valuación. '+str(e))
+                            try:
+                                db=client()
+                                for _,edited_row in edited_history.iterrows():
+                                    record_id=int(edited_row['ID'])
+                                    if bool(edited_row['Eliminar']):db.table('investment_valuations').delete().eq('id',record_id).execute()
+                                    else:
+                                        corrected_date=pd.to_datetime(edited_row['Fecha']).date().isoformat();corrected_value=float(edited_row['Valor']);corrected_note='' if pd.isna(edited_row['Nota']) else str(edited_row['Nota']);db.table('investment_valuations').update({'valuation_date':corrected_date,'value':corrected_value,'notes':corrected_note}).eq('id',record_id).execute()
+                                st.success('Histórico actualizado.');st.rerun()
+                            except Exception as e:st.error('No se pudieron guardar los cambios. Verifica que no haya dos valuaciones de la misma inversión en la misma fecha. '+str(e))
         if not valuations.empty:
             chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_layout(dragmode='zoom',hovermode='x unified');fig.update_xaxes(tickformat='%d %b %Y',fixedrange=False);fig.update_yaxes(tickprefix='$',tickformat=',.0f',fixedrange=False);st.caption('Acerca o aleja con la rueda del mouse sobre la gráfica. Haz doble clic para restablecer la vista.');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
         with st.expander('Eliminar inversión'):
