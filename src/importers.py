@@ -19,6 +19,15 @@ def normalize_category(value: str) -> str:
         "Bienes Inmuebles": "Bienes inmuebles"}
     return aliases.get(text, text)
 
+def normalize_subcategory(value: str) -> str:
+    text = str(value).strip()
+    aliases = {
+        "Ana Limpieza": "Aseo Ana",
+        "Ropa y Accesorios Mariana": "Ropa & Accesorios Mariana",
+        "Ropa y Accesorios Yani": "Ropa & Accesorios Yani",
+    }
+    return aliases.get(text, text or "Sin detalle")
+
 def _read_csv(data: bytes) -> pd.DataFrame:
     for encoding in ("utf-8-sig", "utf-16", "latin1"):
         try:
@@ -39,7 +48,7 @@ def parse_alzex(data: bytes, filename: str) -> pd.DataFrame:
         "movement_date": pd.to_datetime(df["Fecha"], dayfirst=True, errors="coerce"),
         "amount": pd.to_numeric(df["Suma"], errors="coerce").fillna(0),
         "category": split[0].replace(ALIASES).map(normalize_category),
-        "subcategory": split[1].fillna("").str.strip() if split.shape[1] > 1 else "",
+        "subcategory": split[1].fillna("").map(normalize_subcategory) if split.shape[1] > 1 else "Sin detalle",
         "family_member": df.get("Miembro de la Familia", ""),
         "tag": df.get("Etiqueta", ""), "account": df.get("Cuenta", ""),
         "source_file": filename,
@@ -73,7 +82,7 @@ def load_compiled_monthly(path: str, year: int = 2026) -> pd.DataFrame:
         valid = (~detail.str.lower().isin(["", "gasto mensual", "total acumulados"])) & (values != 0)
         for cat, subcat, value in zip(category[valid], detail[valid], values[valid]):
             records.append({"year": year, "month": month_num, "month_name": month_name,
-                            "category": cat, "subcategory": subcat or "Sin detalle",
+                            "category": cat, "subcategory": normalize_subcategory(subcat),
                             "amount": abs(float(value)), "source": "Consolidado"})
     return pd.DataFrame(records)
 
