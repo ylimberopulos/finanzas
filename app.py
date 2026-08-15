@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.14-presupuesto-v1'
+APP_VERSION='2026.08.14-presupuesto-v2-graficas-individuales'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -163,7 +163,71 @@ elif page=='Inversiones':
                                 st.success('Histórico actualizado.');st.rerun()
                             except Exception as e:st.error('No se pudieron guardar los cambios. Verifica que no haya dos valuaciones de la misma inversión en la misma fecha. '+str(e))
         if not valuations.empty:
-            chart=valuations.merge(investments[['id','label']],left_on='investment_id',right_on='id',how='left');fig=px.line(chart,x='valuation_date',y='value',color='label',markers=True,title='Evolución de las inversiones',labels={'valuation_date':'Fecha','value':'Valor','label':'Inversión'});fig.update_layout(dragmode='zoom',hovermode='x unified');fig.update_xaxes(tickformat='%d %b %Y',tickmode='linear',dtick=86400000,fixedrange=False);fig.update_yaxes(tickprefix='$',tickformat=',.0f',fixedrange=False);st.caption('Acerca o aleja con la rueda del mouse sobre la gráfica. Haz doble clic para restablecer la vista.');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+            st.markdown('### Evolución por inversión')
+            st.caption('Cada inversión tiene su propia escala. Acerca o aleja con la rueda del mouse y haz doble clic para restablecer la vista.')
+
+            investment_colors=[BLUE,SKY,RED,'#FCA5A5',GOLD,GREEN,'#8B5CF6','#06B6D4']
+
+            for idx,(_,inv) in enumerate(investments.sort_values(['institution','product']).iterrows()):
+                inv_history=valuations[valuations['investment_id']==inv['id']].copy().sort_values('valuation_date')
+                if inv_history.empty:
+                    continue
+
+                # La gráfica muestra una sola valuación por día: la última registrada.
+                # El histórico conserva todos los registros disponibles.
+                inv_chart=inv_history.copy()
+                inv_chart['chart_date']=inv_chart['valuation_date'].dt.normalize()
+                inv_chart=inv_chart.sort_values('valuation_date').groupby('chart_date',as_index=False).tail(1).sort_values('chart_date')
+
+                current_value=float(inv_chart.iloc[-1]['value'])
+                previous_value=float(inv_chart.iloc[-2]['value']) if len(inv_chart)>1 else pd.NA
+                last_change=current_value-previous_value if pd.notna(previous_value) else pd.NA
+                last_pct=(current_value/previous_value-1) if pd.notna(previous_value) and previous_value else pd.NA
+
+                st.markdown(f"#### {inv['label']}")
+                m1,m2,m3=st.columns(3)
+                m1.metric('Valor actual',money(current_value))
+                if pd.isna(last_change):
+                    m2.metric('Cambio último','—')
+                    m3.metric('% último','—')
+                else:
+                    m2.metric('Cambio último',money(last_change),delta=money(last_change),delta_color='normal')
+                    m3.metric('% último',f'{last_pct:.2%}',delta=f'{last_pct:.2%}',delta_color='normal')
+
+                fig=go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=inv_chart['chart_date'],
+                    y=inv_chart['value'],
+                    mode='lines+markers',
+                    name=inv['label'],
+                    line=dict(width=3,color=investment_colors[idx%len(investment_colors)]),
+                    marker=dict(size=8,color=investment_colors[idx%len(investment_colors)]),
+                    hovertemplate='%{x|%d %b %Y}<br><b>$%{y:,.2f}</b><extra></extra>'
+                ))
+                fig.update_layout(
+                    dragmode='zoom',
+                    hovermode='x unified',
+                    showlegend=False,
+                    height=330,
+                    margin=dict(l=10,r=10,t=15,b=10)
+                )
+                fig.update_xaxes(
+                    title='Fecha',
+                    tickformat='%d %b %Y',
+                    dtick=86400000,
+                    fixedrange=False
+                )
+                fig.update_yaxes(
+                    title='Valor',
+                    tickprefix='$',
+                    tickformat=',.0f',
+                    autorange=True,
+                    fixedrange=False
+                )
+                st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+
+                if idx < len(investments)-1:
+                    st.divider()
         with st.expander('Eliminar inversión'):
             delete_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
             with st.form('delete_investment'):
