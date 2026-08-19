@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.19-presupuesto-v4-total-portafolio'
+APP_VERSION='2026.08.19-presupuesto-v5-cambio-acumulado'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -143,8 +143,8 @@ elif page=='Inversiones':
             history=valuations[valuations['investment_id']==inv['id']].copy() if not valuations.empty else pd.DataFrame()
             if history.empty:first=latest=float(inv['balance']);previous=pd.NA;days=0
             else:first=float(history.iloc[0]['value']);latest=float(history.iloc[-1]['value']);previous=float(history.iloc[-2]['value']) if len(history)>1 else pd.NA;days=max(0,(history.iloc[-1]['valuation_date']-history.iloc[0]['valuation_date']).days)
-            abs_change=latest-previous if pd.notna(previous) else pd.NA;pct_change=(latest/previous-1) if pd.notna(previous) and previous else pd.NA;total_return=(latest/first-1) if len(history)>1 and first else pd.NA;annualized=((latest/first)**(365/days)-1) if len(history)>1 and days>0 and first>0 and latest>=0 else pd.NA
-            projected=latest*(1+annualized) if pd.notna(annualized) else pd.NA;inflation_value=latest*(1+inflation_rate);cetes_value=latest*(1+cetes_rate);summary.append({'Inversión':inv['label'],'Valuaciones':len(history),'Valor actual':latest,'Cambio último':abs_change,'% último':pct_change,'Rendimiento total':total_return,'Proyección anual':annualized,'Proyección 12m':projected,'Referencia inflación 12m':inflation_value,'Diferencia vs. inflación':projected-inflation_value if pd.notna(projected) else pd.NA,'Referencia CETES 12m':cetes_value,'Diferencia vs. CETES':projected-cetes_value if pd.notna(projected) else pd.NA})
+            abs_change=latest-previous if pd.notna(previous) else pd.NA;pct_change=(latest/previous-1) if pd.notna(previous) and previous else pd.NA;total_return=(latest/first-1) if len(history)>1 and first else pd.NA;accumulated_change=(latest-first) if first else pd.NA;accumulated_pct=(latest/first-1) if first else pd.NA;annualized=((latest/first)**(365/days)-1) if len(history)>1 and days>0 and first>0 and latest>=0 else pd.NA
+            projected=latest*(1+annualized) if pd.notna(annualized) else pd.NA;inflation_value=latest*(1+inflation_rate);cetes_value=latest*(1+cetes_rate);summary.append({'Inversión':inv['label'],'Valuaciones':len(history),'Valor actual':latest,'Cambio último':abs_change,'% último':pct_change,'Cambio acumulado':accumulated_change,'% acumulado':accumulated_pct,'Rendimiento total':total_return,'Proyección anual':annualized,'Proyección 12m':projected,'Referencia inflación 12m':inflation_value,'Diferencia vs. inflación':projected-inflation_value if pd.notna(projected) else pd.NA,'Referencia CETES 12m':cetes_value,'Diferencia vs. CETES':projected-cetes_value if pd.notna(projected) else pd.NA})
         summary=pd.DataFrame(summary)
         st.metric('Patrimonio invertido',money(summary['Valor actual'].sum()))
 
@@ -158,6 +158,7 @@ elif page=='Inversiones':
         total_previous=(total_current-total_last_change) if pd.notna(total_last_change) else pd.NA
         total_last_pct=(total_current/total_previous-1) if pd.notna(total_previous) and total_previous else pd.NA
 
+        total_accumulated_change=float(summary['Cambio acumulado'].dropna().sum()) if summary['Cambio acumulado'].notna().any() else pd.NA
         total_projection_12m=float(summary['Proyección 12m'].dropna().sum()) if summary['Proyección 12m'].notna().any() else pd.NA
         total_projection_rate=(total_projection_12m/total_current-1) if pd.notna(total_projection_12m) and total_current else pd.NA
 
@@ -176,6 +177,7 @@ elif page=='Inversiones':
                 initial_parts.append(float(current)/(1+float(r)))
         total_initial=sum(initial_parts) if initial_parts else pd.NA
         portfolio_total_return=(total_current/total_initial-1) if pd.notna(total_initial) and total_initial else pd.NA
+        portfolio_accumulated_pct=(total_accumulated_change/total_initial) if pd.notna(total_accumulated_change) and pd.notna(total_initial) and total_initial else pd.NA
 
         total_row={
             'Inversión':'TOTAL',
@@ -183,6 +185,8 @@ elif page=='Inversiones':
             'Valor actual':total_current,
             'Cambio último':total_last_change,
             '% último':total_last_pct,
+            'Cambio acumulado':total_accumulated_change,
+            '% acumulado':portfolio_accumulated_pct,
             'Rendimiento total':portfolio_total_return,
             'Proyección anual':total_projection_rate,
             'Proyección 12m':total_projection_12m,
@@ -195,8 +199,8 @@ elif page=='Inversiones':
         summary_with_total=pd.concat([summary,pd.DataFrame([total_row])],ignore_index=True)
         display=summary_with_total.copy()
 
-        money_cols=['Valor actual','Cambio último','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']
-        pct_cols=['% último','Rendimiento total','Proyección anual']
+        money_cols=['Valor actual','Cambio último','Cambio acumulado','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']
+        pct_cols=['% último','% acumulado','Rendimiento total','Proyección anual']
 
         for col in money_cols:
             display[col]=display[col].map(lambda x:'—' if pd.isna(x) else money(x))
@@ -212,7 +216,7 @@ elif page=='Inversiones':
 
         styled=display.style.map(
             table_negative_red,
-            subset=['Cambio último','% último','Rendimiento total','Proyección anual',
+            subset=['Cambio último','% último','Cambio acumulado','% acumulado','Rendimiento total','Proyección anual',
                     'Diferencia vs. inflación','Diferencia vs. CETES']
         ).apply(
             lambda row:['font-weight:800;background-color:#F1F5F9' if row.name==len(display)-1 else '' for _ in row],
@@ -220,7 +224,7 @@ elif page=='Inversiones':
         )
 
         st.dataframe(styled,hide_index=True,use_container_width=True)
-        st.caption('“Cambio último” y “% último” comparan las dos valuaciones más recientes registradas para cada inversión. En TOTAL, los importes se suman y los porcentajes se calculan a nivel del portafolio cuando corresponde.')
+        st.caption('“Cambio último” y “% último” comparan las dos valuaciones más recientes. “Cambio acumulado” y “% acumulado” comparan el valor actual contra la primera valuación registrada. En TOTAL, los importes se suman y los porcentajes se calculan a nivel del portafolio.')
         if st.session_state.pop('valuation_flash',False):
             st.success('✅ Valuación guardada correctamente.')
         with st.expander('Registrar nueva valuación'):
