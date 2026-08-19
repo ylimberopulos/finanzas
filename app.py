@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.14-presupuesto-v2-graficas-individuales'
+APP_VERSION='2026.08.19-presupuesto-v4-total-portafolio'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -33,6 +33,25 @@ def initial_movements():
     p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
 def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
 def money(v):return f'${v:,.2f}' if abs(v-round(v))>.001 else f'${v:,.0f}'
+def parse_money_input(value):
+    cleaned=str(value or '').replace('$','').replace(',','').strip()
+    if not cleaned:return None
+    return float(cleaned)
+def metric_card(label,value,change=None):
+    if change is None:
+        value_color=NAVY
+        pill=''
+    else:
+        numeric=float(change)
+        value_color=GREEN if numeric>0 else RED if numeric<0 else NAVY
+        bg='#DCFCE7' if numeric>0 else '#FEE2E2' if numeric<0 else '#E5E7EB'
+        arrow='↑' if numeric>0 else '↓' if numeric<0 else '→'
+        pill=f'<span style="display:inline-block;margin-top:10px;padding:4px 9px;border-radius:999px;background:{bg};color:{value_color};font-weight:700;font-size:.85rem">{arrow} {value}</span>'
+    return f'''<div style="background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610;min-height:122px">
+      <div style="font-size:.85rem;color:#475569;margin-bottom:8px">{label}</div>
+      <div style="font-size:1.9rem;line-height:1.05;font-weight:500;color:{value_color}">{value}</div>
+      {pill}
+    </div>'''
 def change_color(v):
     try:n=float(str(v).replace('$','').replace(',',''))
     except (TypeError,ValueError):return ''
@@ -126,18 +145,109 @@ elif page=='Inversiones':
             else:first=float(history.iloc[0]['value']);latest=float(history.iloc[-1]['value']);previous=float(history.iloc[-2]['value']) if len(history)>1 else pd.NA;days=max(0,(history.iloc[-1]['valuation_date']-history.iloc[0]['valuation_date']).days)
             abs_change=latest-previous if pd.notna(previous) else pd.NA;pct_change=(latest/previous-1) if pd.notna(previous) and previous else pd.NA;total_return=(latest/first-1) if len(history)>1 and first else pd.NA;annualized=((latest/first)**(365/days)-1) if len(history)>1 and days>0 and first>0 and latest>=0 else pd.NA
             projected=latest*(1+annualized) if pd.notna(annualized) else pd.NA;inflation_value=latest*(1+inflation_rate);cetes_value=latest*(1+cetes_rate);summary.append({'Inversión':inv['label'],'Valuaciones':len(history),'Valor actual':latest,'Cambio último':abs_change,'% último':pct_change,'Rendimiento total':total_return,'Proyección anual':annualized,'Proyección 12m':projected,'Referencia inflación 12m':inflation_value,'Diferencia vs. inflación':projected-inflation_value if pd.notna(projected) else pd.NA,'Referencia CETES 12m':cetes_value,'Diferencia vs. CETES':projected-cetes_value if pd.notna(projected) else pd.NA})
-        summary=pd.DataFrame(summary);st.metric('Patrimonio invertido',money(summary['Valor actual'].sum()));display=summary.copy()
-        for col in ['Valor actual','Cambio último','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else money(x))
-        for col in ['% último','Rendimiento total','Proyección anual']:display[col]=display[col].map(lambda x:'—' if pd.isna(x) else f'{x:.2%}')
-        st.dataframe(display.style.map(change_color,subset=['Cambio último']),hide_index=True,use_container_width=True);st.caption('“Cambio último” y “% último” comparan las dos valuaciones más recientes registradas para cada inversión.')
+        summary=pd.DataFrame(summary)
+        st.metric('Patrimonio invertido',money(summary['Valor actual'].sum()))
+
+        # Renglón TOTAL del portafolio.
+        # - Valuaciones: suma de registros.
+        # - Valor actual / cambios / referencias / diferencias: suma.
+        # - Porcentajes: se calculan a nivel portafolio cuando es posible,
+        #   en lugar de promediar porcentajes simples.
+        total_current=float(summary['Valor actual'].sum())
+        total_last_change=float(summary['Cambio último'].dropna().sum()) if summary['Cambio último'].notna().any() else pd.NA
+        total_previous=(total_current-total_last_change) if pd.notna(total_last_change) else pd.NA
+        total_last_pct=(total_current/total_previous-1) if pd.notna(total_previous) and total_previous else pd.NA
+
+        total_projection_12m=float(summary['Proyección 12m'].dropna().sum()) if summary['Proyección 12m'].notna().any() else pd.NA
+        total_projection_rate=(total_projection_12m/total_current-1) if pd.notna(total_projection_12m) and total_current else pd.NA
+
+        total_inflation=float(summary['Referencia inflación 12m'].dropna().sum()) if summary['Referencia inflación 12m'].notna().any() else pd.NA
+        total_diff_inflation=float(summary['Diferencia vs. inflación'].dropna().sum()) if summary['Diferencia vs. inflación'].notna().any() else pd.NA
+        total_cetes=float(summary['Referencia CETES 12m'].dropna().sum()) if summary['Referencia CETES 12m'].notna().any() else pd.NA
+        total_diff_cetes=float(summary['Diferencia vs. CETES'].dropna().sum()) if summary['Diferencia vs. CETES'].notna().any() else pd.NA
+
+        # Rendimiento total del portafolio: reconstruimos el capital inicial
+        # a partir de valor actual y rendimiento total individual.
+        initial_parts=[]
+        for _,row in summary.iterrows():
+            r=row['Rendimiento total']
+            current=row['Valor actual']
+            if pd.notna(r) and (1+r)!=0:
+                initial_parts.append(float(current)/(1+float(r)))
+        total_initial=sum(initial_parts) if initial_parts else pd.NA
+        portfolio_total_return=(total_current/total_initial-1) if pd.notna(total_initial) and total_initial else pd.NA
+
+        total_row={
+            'Inversión':'TOTAL',
+            'Valuaciones':int(summary['Valuaciones'].sum()),
+            'Valor actual':total_current,
+            'Cambio último':total_last_change,
+            '% último':total_last_pct,
+            'Rendimiento total':portfolio_total_return,
+            'Proyección anual':total_projection_rate,
+            'Proyección 12m':total_projection_12m,
+            'Referencia inflación 12m':total_inflation,
+            'Diferencia vs. inflación':total_diff_inflation,
+            'Referencia CETES 12m':total_cetes,
+            'Diferencia vs. CETES':total_diff_cetes
+        }
+
+        summary_with_total=pd.concat([summary,pd.DataFrame([total_row])],ignore_index=True)
+        display=summary_with_total.copy()
+
+        money_cols=['Valor actual','Cambio último','Proyección 12m','Referencia inflación 12m','Diferencia vs. inflación','Referencia CETES 12m','Diferencia vs. CETES']
+        pct_cols=['% último','Rendimiento total','Proyección anual']
+
+        for col in money_cols:
+            display[col]=display[col].map(lambda x:'—' if pd.isna(x) else money(x))
+        for col in pct_cols:
+            display[col]=display[col].map(lambda x:'—' if pd.isna(x) else f'{x:.2%}')
+
+        def table_negative_red(value):
+            if isinstance(value,str):
+                cleaned=value.replace('$','').replace(',','').replace('%','').strip()
+                if cleaned.startswith('-'):
+                    return 'color:#DC2626;font-weight:700'
+            return ''
+
+        styled=display.style.map(
+            table_negative_red,
+            subset=['Cambio último','% último','Rendimiento total','Proyección anual',
+                    'Diferencia vs. inflación','Diferencia vs. CETES']
+        ).apply(
+            lambda row:['font-weight:800;background-color:#F1F5F9' if row.name==len(display)-1 else '' for _ in row],
+            axis=1
+        )
+
+        st.dataframe(styled,hide_index=True,use_container_width=True)
+        st.caption('“Cambio último” y “% último” comparan las dos valuaciones más recientes registradas para cada inversión. En TOTAL, los importes se suman y los porcentajes se calculan a nivel del portafolio cuando corresponde.')
+        if st.session_state.pop('valuation_flash',False):
+            st.success('✅ Valuación guardada correctamente.')
         with st.expander('Registrar nueva valuación'):
             valuation_investments={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
+            valuation_value_key=st.session_state.get('valuation_value_key',0)
             with st.form('valuation'):
-                v1,v2=st.columns(2);selected_label=v1.selectbox('Inversión',list(valuation_investments));vdate=v2.date_input('Fecha de valuación');value=v1.number_input('Valor actual',min_value=0.0,step=100.0);notes=v2.text_input('Nota opcional');save_value=st.form_submit_button('Guardar valuación',type='primary')
+                v1,v2=st.columns(2)
+                selected_label=v1.selectbox('Inversión',list(valuation_investments))
+                vdate=v2.date_input('Fecha de valuación')
+                value_text=v1.text_input('Valor actual',value='',placeholder='Ej. 404,789.00',key=f'valuation_value_{valuation_value_key}')
+                notes=v2.text_input('Nota opcional')
+                save_value=st.form_submit_button('Guardar valuación',type='primary')
             if save_value:
                 inv_id=valuation_investments[selected_label]
-                try:insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':vdate.isoformat(),'value':value,'notes':notes});st.success('Valuación registrada');st.rerun()
-                except Exception as e:st.error('No se pudo guardar. Si ya existe una valuación de ese día, usa otra fecha. '+str(e))
+                try:
+                    value=parse_money_input(value_text)
+                    if value is None or value<0:
+                        st.error('Captura un valor actual válido.')
+                    else:
+                        insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':vdate.isoformat(),'value':value,'notes':notes})
+                        st.session_state['valuation_flash']=True
+                        st.session_state['valuation_value_key']=valuation_value_key+1
+                        st.rerun()
+                except ValueError:
+                    st.error('El valor actual debe ser numérico. Puedes escribirlo como 404,789.00.')
+                except Exception as e:
+                    st.error('No se pudo guardar. Si ya existe una valuación de ese día, usa otra fecha. '+str(e))
         if not valuations.empty:
             with st.expander('Consultar y corregir histórico de valuaciones'):
                 history_options={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
@@ -179,18 +289,23 @@ elif page=='Inversiones':
 
                 current_value=float(inv_chart.iloc[-1]['value'])
                 previous_value=float(inv_chart.iloc[-2]['value']) if len(inv_chart)>1 else pd.NA
+                first_value=float(inv_chart.iloc[0]['value'])
                 last_change=current_value-previous_value if pd.notna(previous_value) else pd.NA
                 last_pct=(current_value/previous_value-1) if pd.notna(previous_value) and previous_value else pd.NA
+                accumulated_change=current_value-first_value if len(inv_chart)>1 else 0.0
+                accumulated_pct=(current_value/first_value-1) if len(inv_chart)>1 and first_value else 0.0
 
                 st.markdown(f"#### {inv['label']}")
-                m1,m2,m3=st.columns(3)
-                m1.metric('Valor actual',money(current_value))
+                m1,m2,m3,m4,m5=st.columns(5)
+                m1.markdown(metric_card('Valor actual',money(current_value)),unsafe_allow_html=True)
                 if pd.isna(last_change):
-                    m2.metric('Cambio último','—')
-                    m3.metric('% último','—')
+                    m2.markdown(metric_card('Cambio último','—'),unsafe_allow_html=True)
+                    m3.markdown(metric_card('% último','—'),unsafe_allow_html=True)
                 else:
-                    m2.metric('Cambio último',money(last_change),delta=money(last_change),delta_color='normal')
-                    m3.metric('% último',f'{last_pct:.2%}',delta=f'{last_pct:.2%}',delta_color='normal')
+                    m2.markdown(metric_card('Cambio último',money(last_change),last_change),unsafe_allow_html=True)
+                    m3.markdown(metric_card('% último',f'{last_pct:.2%}',last_pct),unsafe_allow_html=True)
+                m4.markdown(metric_card('Cambio acumulado',money(accumulated_change),accumulated_change),unsafe_allow_html=True)
+                m5.markdown(metric_card('% acumulado',f'{accumulated_pct:.2%}',accumulated_pct),unsafe_allow_html=True)
 
                 fig=go.Figure()
                 fig.add_trace(go.Scatter(
