@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.20-presupuesto-v7-flujos-capital'
+APP_VERSION='2026.08.20-presupuesto-v8-fix-form-callback'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -307,21 +307,23 @@ elif page=='Inversiones':
         with st.expander('Registrar nueva valuación'):
             valuation_investments={f"{row['label']} · ID {int(row['id'])}":int(row['id']) for _,row in investments.iterrows()}
             valuation_value_key=st.session_state.get('valuation_value_key',0)
-            with st.form('valuation'):
-                v1,v2=st.columns(2)
-                selected_label=v1.selectbox('Inversión',list(valuation_investments))
-                vdate=v2.date_input('Fecha de valuación')
-                valuation_field_key=f'valuation_value_{valuation_value_key}'
-                value_text=v1.text_input(
-                    'Valor actual',
-                    value='',
-                    placeholder='Ej. 404,789.00',
-                    key=valuation_field_key,
-                    on_change=format_money_field,
-                    args=(valuation_field_key,)
-                )
-                notes=v2.text_input('Nota opcional')
-                save_value=st.form_submit_button('Guardar valuación',type='primary')
+
+            v1,v2=st.columns(2)
+            selected_label=v1.selectbox('Inversión',list(valuation_investments),key=f'valuation_investment_{valuation_value_key}')
+            vdate=v2.date_input('Fecha de valuación',key=f'valuation_date_{valuation_value_key}')
+
+            valuation_field_key=f'valuation_value_{valuation_value_key}'
+            value_text=v1.text_input(
+                'Valor actual',
+                value='',
+                placeholder='Ej. 404,789.00',
+                key=valuation_field_key,
+                on_change=format_money_field,
+                args=(valuation_field_key,)
+            )
+            notes=v2.text_input('Nota opcional',key=f'valuation_notes_{valuation_value_key}')
+
+            save_value=st.button('Guardar valuación',type='primary',key=f'save_valuation_{valuation_value_key}')
             if save_value:
                 inv_id=valuation_investments[selected_label]
                 try:
@@ -329,7 +331,12 @@ elif page=='Inversiones':
                     if value is None or value<0:
                         st.error('Captura un valor actual válido.')
                     else:
-                        insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':vdate.isoformat(),'value':value,'notes':notes})
+                        insert_one('investment_valuations',{
+                            'investment_id':inv_id,
+                            'valuation_date':vdate.isoformat(),
+                            'value':value,
+                            'notes':notes
+                        })
                         st.session_state['valuation_flash']=True
                         st.session_state['valuation_value_key']=valuation_value_key+1
                         st.rerun()
