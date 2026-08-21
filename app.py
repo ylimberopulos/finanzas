@@ -4,11 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v18-detalle-mensual-porcentajes'
-ALZEX_MONTHLY_TOTAL_OVERRIDES={
-    (2026,7):134991.53,
-    (2026,8):69128.50,
-}
+APP_VERSION='2026.08.21-presupuesto-v19-auditable-sin-ajustes'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -232,8 +228,8 @@ def db_movements():
     if not df.empty:df['movement_date']=pd.to_datetime(df.movement_date);df['amount']=pd.to_numeric(df.amount)
     return df
 def analytical_monthly():
-    # Si Supabase tiene movimientos, esa es la fuente principal y completa.
-    # El consolidado Excel queda únicamente como respaldo cuando la BD está vacía.
+    # Fuente auditable: cada peso mostrado proviene únicamente de movimientos guardados.
+    # No se agregan ajustes manuales ni conciliaciones artificiales.
     mov=db_movements()
 
     if not mov.empty:
@@ -262,36 +258,10 @@ def analytical_monthly():
             )['amount'].sum()
         )
         tx['source']='Alzex'
-
-        # Conciliación contra los totales mostrados directamente por Alzex.
-        # Cuando el CSV exportado no reproduce exactamente el total visible en Alzex,
-        # agregamos una partida de conciliación separada, sin atribuirla a una categoría inventada.
-        monthly_totals=tx.groupby(['year','month'],as_index=False)['amount'].sum()
-        adjustments=[]
-        for (adj_year,adj_month),target_total in ALZEX_MONTHLY_TOTAL_OVERRIDES.items():
-            row=monthly_totals[
-                (monthly_totals['year']==adj_year) &
-                (monthly_totals['month']==adj_month)
-            ]
-            current_total=float(row.iloc[0]['amount']) if not row.empty else 0.0
-            difference=round(float(target_total)-current_total,2)
-            if abs(difference)>0.009:
-                adjustments.append({
-                    'year':adj_year,
-                    'month':adj_month,
-                    'month_name':MONTHS[adj_month],
-                    'category':'Conciliación Alzex',
-                    'subcategory':'Diferencia entre CSV y Panorama general',
-                    'amount':difference,
-                    'source':'Ajuste Alzex'
-                })
-
-        if adjustments:
-            tx=pd.concat([tx,pd.DataFrame(adjustments)],ignore_index=True)
-
         return tx
 
     return compiled_data().copy()
+
 def period_filter(df,key):
     years=sorted(df.year.unique(),reverse=True);c1,c2=st.columns([1,3]);year=c1.selectbox('Año',years,key='y'+key);available=sorted(df.loc[df.year==year,'month'].unique());names=[MONTHS[m] for m in available];chosen=c2.multiselect('Meses a analizar',names,default=names,key='months'+key);selected=sorted(MONTH_NUM[m] for m in chosen)
     if not selected:st.info('Selecciona al menos un mes.');st.stop()
@@ -369,11 +339,6 @@ def subcategory_treemap(view,top_categories=12):
     data['category']=data['category'].fillna('Sin clasificar')
     data['subcategory']=data['subcategory'].fillna('Sin detalle')
 
-    # El ajuste de conciliación conserva el total mensual, pero no es una categoría real.
-    data=data[data['category']!='Conciliación Alzex'].copy()
-    if data.empty:
-        return go.Figure()
-
     keep_categories=list(
         data.groupby('category').amount.sum()
         .sort_values(ascending=False)
@@ -389,34 +354,33 @@ def subcategory_treemap(view,top_categories=12):
         .sort_values('amount',ascending=False)
     )
 
+    ids=[]
     labels=[]
     parents=[]
     values=[]
-    ids=[]
     custom=[]
     text_display=[]
 
-    # Nodos de categoría.
+    # Franja superior de cada categoría: nombre + $ absoluto + % del total seleccionado.
     for _,row in cat_totals.iterrows():
         cat=str(row['category'])
         val=float(row['amount'])
         pct=(val/grand_total) if grand_total else 0
-        node_id=f"cat::{cat}"
-        ids.append(node_id)
-        labels.append(cat)
+        ids.append(f"cat::{cat}")
+        labels.append(f"{cat} · {money(val)} ({pct:.1%})")
         parents.append('')
         values.append(val)
         custom.append([val,pct])
-        text_display.append(f"{cat}<br>{money(val)} ({pct:.1%})")
+        text_display.append(f"{cat} · {money(val)} ({pct:.1%})")
 
-    # Nodos de subcategoría.
+    # Subcategorías: nombre + $ absoluto + % del total seleccionado.
     for _,row in chart.iterrows():
         cat=str(row['category'])
         sub=str(row['subcategory'])
         val=float(row['amount'])
         pct=(val/grand_total) if grand_total else 0
         ids.append(f"sub::{cat}::{sub}")
-        labels.append(sub)
+        labels.append(f"{sub} · {money(val)} ({pct:.1%})")
         parents.append(f"cat::{cat}")
         values.append(val)
         custom.append([val,pct])
@@ -475,7 +439,6 @@ if page=='Resumen':
         int(m) for m in monthly.loc[monthly['year']==2026,'month'].dropna().unique()
     )
     st.caption('Meses disponibles en el análisis: '+', '.join(MONTHS[m] for m in _months_loaded))
-    st.caption('Julio y agosto están conciliados contra los totales visibles en Panorama general de Alzex; la diferencia del CSV se muestra como “Conciliación Alzex”.')
     view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
     left,right=st.columns([1.35,1])
     with left:
@@ -484,7 +447,7 @@ if page=='Resumen':
         st.plotly_chart(horizontal_month_chart(view,'Principales categorías por mes'),use_container_width=True,config=PLOT_CONFIG)
 
     st.markdown('### Detalle por categoría y subcategoría')
-    st.caption('Puedes acotar esta sección a uno o varios meses sin cambiar el filtro principal del Resumen.')
+    st.caption('Esta sección usa únicamente los movimientos respaldados por el CSV/Supabase. No hay ajustes manuales.')
 
     detail_month_options=[MONTHS[m] for m in selected]
     detail_month_names=st.multiselect(
@@ -497,27 +460,14 @@ if page=='Resumen':
 
     detail_view=view[view['month'].isin(detail_month_nums)].copy() if detail_month_nums else view.iloc[0:0].copy()
 
-    reconciliation_detail=detail_view[detail_view['category']=='Conciliación Alzex'].copy()
-    detail_real=detail_view[detail_view['category']!='Conciliación Alzex'].copy()
-
-    if not reconciliation_detail.empty:
-        rec_total=float(reconciliation_detail['amount'].sum())
-        rec_by_month=(
-            reconciliation_detail.groupby('month_name',as_index=False).amount.sum()
-        )
-        rec_text=' · '.join(f"{r['month_name']}: {money(r['amount'])}" for _,r in rec_by_month.iterrows())
-        st.info(
-            f'Ajuste de conciliación no categorizado: {money(rec_total)}. '
-            f'Es la diferencia necesaria para que el total mensual coincida con el Panorama general de Alzex, '
-            f'pero el CSV no trae suficiente detalle para asignarla a una categoría real. {rec_text}'
-        )
-
-    if detail_real.empty:
-        st.info('Selecciona al menos un mes con movimientos categorizados.')
+    if detail_view.empty:
+        st.info('Selecciona al menos un mes con movimientos.')
     else:
         dc1,dc2=st.columns([1,1])
-        max_cats=max(5,min(15,int(detail_real['category'].nunique())))
+        unique_cats=max(1,int(detail_view['category'].nunique()))
+        max_cats=max(5,min(15,unique_cats))
         default_cats=min(10,max_cats)
+
         top_categories_detail=dc1.slider(
             'Categorías a mostrar',
             min_value=5,
@@ -536,16 +486,43 @@ if page=='Resumen':
         tab1,tab2=st.tabs(['Gráfica apilada','Mapa de gasto'])
         with tab1:
             st.plotly_chart(
-                subcategory_stacked_chart(detail_real,top_categories_detail,top_subcategories_detail),
+                subcategory_stacked_chart(detail_view,top_categories_detail,top_subcategories_detail),
                 use_container_width=True,
                 config=PLOT_CONFIG
             )
         with tab2:
             st.plotly_chart(
-                subcategory_treemap(detail_real,top_categories_detail),
+                subcategory_treemap(detail_view,top_categories_detail),
                 use_container_width=True,
                 config=PLOT_CONFIG
             )
+
+        st.markdown('### Conciliación auditable del CSV')
+        st.caption('Aquí puedes revisar exactamente cuánto suma el archivo por mes y categoría. Si el Panorama de Alzex muestra otro total, la diferencia queda visible y no se inventa.')
+
+        audit=(
+            detail_view.groupby(['month','month_name','category'],as_index=False)
+            .amount.sum()
+            .sort_values(['month','amount'],ascending=[True,False])
+        )
+        audit['Importe']=audit['amount'].map(money)
+        audit_show=audit[['month_name','category','Importe']].rename(
+            columns={'month_name':'Mes','category':'Categoría'}
+        )
+        st.dataframe(audit_show,hide_index=True,use_container_width=True)
+
+        monthly_audit=(
+            detail_view.groupby(['month','month_name'],as_index=False)
+            .amount.sum()
+            .sort_values('month')
+        )
+        monthly_audit['Total respaldado por CSV']=monthly_audit['amount'].map(money)
+        st.table(
+            monthly_audit[['month_name','Total respaldado por CSV']]
+            .rename(columns={'month_name':'Mes'})
+            .set_index('Mes')
+        )
+
 elif page=='Tendencias y fugas':
     st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG);st.plotly_chart(vertical_composition(view,y_step),use_container_width=True,config=PLOT_CONFIG);current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});st.plotly_chart(all_categories_chart(view),use_container_width=True,config=PLOT_CONFIG)
 elif page=='Presupuesto':
