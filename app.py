@@ -4,7 +4,11 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v15-gastos-reales-conciliacion'
+APP_VERSION='2026.08.21-presupuesto-v16-conciliado-alzex'
+ALZEX_MONTHLY_TOTAL_OVERRIDES={
+    (2026,7):134991.53,
+    (2026,8):69128.50,
+}
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -258,6 +262,33 @@ def analytical_monthly():
             )['amount'].sum()
         )
         tx['source']='Alzex'
+
+        # Conciliación contra los totales mostrados directamente por Alzex.
+        # Cuando el CSV exportado no reproduce exactamente el total visible en Alzex,
+        # agregamos una partida de conciliación separada, sin atribuirla a una categoría inventada.
+        monthly_totals=tx.groupby(['year','month'],as_index=False)['amount'].sum()
+        adjustments=[]
+        for (adj_year,adj_month),target_total in ALZEX_MONTHLY_TOTAL_OVERRIDES.items():
+            row=monthly_totals[
+                (monthly_totals['year']==adj_year) &
+                (monthly_totals['month']==adj_month)
+            ]
+            current_total=float(row.iloc[0]['amount']) if not row.empty else 0.0
+            difference=round(float(target_total)-current_total,2)
+            if abs(difference)>0.009:
+                adjustments.append({
+                    'year':adj_year,
+                    'month':adj_month,
+                    'month_name':MONTHS[adj_month],
+                    'category':'Conciliación Alzex',
+                    'subcategory':'Diferencia entre CSV y Panorama general',
+                    'amount':difference,
+                    'source':'Ajuste Alzex'
+                })
+
+        if adjustments:
+            tx=pd.concat([tx,pd.DataFrame(adjustments)],ignore_index=True)
+
         return tx
 
     return compiled_data().copy()
@@ -322,6 +353,7 @@ if page=='Resumen':
         int(m) for m in monthly.loc[monthly['year']==2026,'month'].dropna().unique()
     )
     st.caption('Meses disponibles en el análisis: '+', '.join(MONTHS[m] for m in _months_loaded))
+    st.caption('Julio y agosto están conciliados contra los totales visibles en Panorama general de Alzex; la diferencia del CSV se muestra como “Conciliación Alzex”.')
     view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
     left,right=st.columns([1.35,1])
     with left:
