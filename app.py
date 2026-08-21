@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v29-apartados-fix-mes'
+APP_VERSION='2026.08.21-presupuesto-v30-grafica-subcategorias'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -538,6 +538,52 @@ def save_monthly_reserves(year,edited):
         insert_rows_batched('monthly_reserves',rows,batch_size=200)
     return len(rows)
 
+def subcategory_ranking_chart(view,top_n=20):
+    data=view.copy()
+    if data.empty:
+        return go.Figure()
+
+    data['category']=data['category'].fillna('Sin clasificar')
+    data['subcategory']=data['subcategory'].fillna('Sin detalle')
+
+    chart=(
+        data.groupby(['subcategory','category'],as_index=False)
+        .amount.sum()
+        .sort_values('amount',ascending=False)
+        .head(top_n)
+        .sort_values('amount',ascending=True)
+    )
+
+    total=float(data['amount'].sum())
+    chart['share']=chart['amount']/total if total else 0
+
+    fig=px.bar(
+        chart,
+        x='amount',
+        y='subcategory',
+        orientation='h',
+        color='category',
+        title=f'Top {min(top_n,len(chart))} subcategorías por gasto',
+        labels={
+            'amount':'Gasto',
+            'subcategory':'Subcategoría',
+            'category':'Categoría'
+        },
+        custom_data=['share','category']
+    )
+    fig.update_traces(
+        text=[f"{money(v)} ({p:.1%})" for v,p in zip(chart['amount'],chart['share'])],
+        textposition='outside',
+        hovertemplate='<b>%{y}</b><br>$%{x:,.2f}<br>%{customdata[0]:.1%} del gasto total<br>Categoría: %{customdata[1]}<extra></extra>'
+    )
+    fig.update_xaxes(tickprefix='$',tickformat=',.0f')
+    fig.update_layout(
+        height=max(520,30*len(chart)),
+        margin=dict(l=10,r=120,t=52,b=10),
+        legend_title_text='Categoría'
+    )
+    return style(fig)
+
 authenticate()
 with st.sidebar:
     st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Apartados mensuales','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
@@ -677,6 +723,22 @@ if page=='Resumen':
 
 elif page=='Tendencias y fugas':
     st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');render_chart(style(fig),'tendencia_mensual','chart_tendencia_mensual');render_chart(vertical_composition(view,y_step),'composicion_gasto_mes','chart_composicion_mes');current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});render_chart(all_categories_chart(view),'gasto_todas_categorias','chart_todas_categorias')
+
+    st.subheader('Concentración por subcategoría')
+    st.caption('Aquí el foco es exclusivamente la subcategoría. Las barras están ordenadas de mayor a menor y el color sólo indica a qué categoría pertenece cada una.')
+    top_subcats=st.slider(
+        'Número de subcategorías a mostrar',
+        min_value=10,
+        max_value=40,
+        value=20,
+        step=5,
+        key='trend_top_subcategories'
+    )
+    render_chart(
+        subcategory_ranking_chart(view,top_subcats),
+        'ranking_subcategorias',
+        'chart_ranking_subcategorias'
+    )
 elif page=='Presupuesto':
     st.title('Presupuesto contra gasto real');st.caption('Comparación mensual o acumulada con categorías conciliadas');view,selected,label,year=period_filter(monthly,'bud');plan=budget.groupby('category').monthly_budget.sum()*len(selected);actual=view.groupby('category').amount.sum();comp=pd.concat([plan.rename('Presupuesto'),actual.rename('Real')],axis=1).fillna(0);comp['Variación']=comp.Real-comp.Presupuesto;comp['Ejercicio']=comp.Real/comp.Presupuesto.replace(0,pd.NA);comp=comp.reset_index().rename(columns={'category':'Categoría'}).sort_values('Variación',ascending=False);st.markdown('#### '+label);c1,c2,c3=st.columns(3);c1.metric('Presupuesto',money(comp.Presupuesto.sum()));c2.metric('Gasto real',money(comp.Real.sum()));c3.metric('Variación',money(comp.Variación.sum()),delta_color='inverse');display=comp.copy();display['Presupuesto']=display.Presupuesto.map(money);display['Real']=display.Real.map(money);display['Variación']=display.Variación.map(money);display['Ejercicio']=display.Ejercicio.map(lambda x:'—' if pd.isna(x) else f'{x:.1%}');styled=display.style.map(lambda v:f'color:{GREEN};font-weight:600' if str(v).startswith('$-') else f'color:{RED};font-weight:600',subset=['Variación']);st.dataframe(styled,hide_index=True,use_container_width=True)
 elif page=='Apartados mensuales':
