@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v17-detalle-subcategorias'
+APP_VERSION='2026.08.21-presupuesto-v18-detalle-mensual-porcentajes'
 ALZEX_MONTHLY_TOTAL_OVERRIDES={
     (2026,7):134991.53,
     (2026,8):69128.50,
@@ -337,6 +337,8 @@ def subcategory_stacked_chart(view,top_categories=10,top_subcategories=12):
         data.groupby(['category','subcategory_plot'],as_index=False)
         .amount.sum()
     )
+    total_detail=float(chart['amount'].sum())
+    chart['pct_total']=chart['amount']/total_detail if total_detail else 0
     category_order=list(chart.groupby('category').amount.sum().sort_values(ascending=True).index)
     fig=px.bar(
         chart,
@@ -347,7 +349,11 @@ def subcategory_stacked_chart(view,top_categories=10,top_subcategories=12):
         barmode='stack',
         title='Detalle por categoría y subcategoría',
         labels={'amount':'Gasto','category':'Categoría','subcategory_plot':'Subcategoría'},
-        category_orders={'category':category_order}
+        category_orders={'category':category_order},
+        custom_data=['pct_total']
+    )
+    fig.update_traces(
+        hovertemplate='<b>%{fullData.name}</b><br>$%{x:,.2f} (%{customdata[0]:.1%})<extra></extra>'
     )
     fig.update_xaxes(tickprefix='$',tickformat=',.0f')
     totals=chart.groupby('category',as_index=False).amount.sum()
@@ -359,23 +365,81 @@ def subcategory_treemap(view,top_categories=12):
     data=view.copy()
     if data.empty:
         return go.Figure()
+
     data['category']=data['category'].fillna('Sin clasificar')
     data['subcategory']=data['subcategory'].fillna('Sin detalle')
-    keep_categories=list(data.groupby('category').amount.sum().sort_values(ascending=False).head(top_categories).index)
+
+    # El ajuste de conciliación conserva el total mensual, pero no es una categoría real.
+    data=data[data['category']!='Conciliación Alzex'].copy()
+    if data.empty:
+        return go.Figure()
+
+    keep_categories=list(
+        data.groupby('category').amount.sum()
+        .sort_values(ascending=False)
+        .head(top_categories).index
+    )
     data=data[data['category'].isin(keep_categories)].copy()
+
     chart=data.groupby(['category','subcategory'],as_index=False).amount.sum()
-    fig=px.treemap(
-        chart,
-        path=['category','subcategory'],
-        values='amount',
-        title='Mapa de gasto por categoría y subcategoría'
+    grand_total=float(chart['amount'].sum())
+
+    cat_totals=(
+        chart.groupby('category',as_index=False).amount.sum()
+        .sort_values('amount',ascending=False)
     )
-    fig.update_traces(
-        texttemplate='%{label}<br>$%{value:,.0f}',
-        hovertemplate='<b>%{label}</b><br>$%{value:,.2f}<extra></extra>'
+
+    labels=[]
+    parents=[]
+    values=[]
+    ids=[]
+    custom=[]
+    text_display=[]
+
+    # Nodos de categoría.
+    for _,row in cat_totals.iterrows():
+        cat=str(row['category'])
+        val=float(row['amount'])
+        pct=(val/grand_total) if grand_total else 0
+        node_id=f"cat::{cat}"
+        ids.append(node_id)
+        labels.append(cat)
+        parents.append('')
+        values.append(val)
+        custom.append([val,pct])
+        text_display.append(f"{cat}<br>{money(val)} ({pct:.1%})")
+
+    # Nodos de subcategoría.
+    for _,row in chart.iterrows():
+        cat=str(row['category'])
+        sub=str(row['subcategory'])
+        val=float(row['amount'])
+        pct=(val/grand_total) if grand_total else 0
+        ids.append(f"sub::{cat}::{sub}")
+        labels.append(sub)
+        parents.append(f"cat::{cat}")
+        values.append(val)
+        custom.append([val,pct])
+        text_display.append(f"{sub}<br>{money(val)} ({pct:.1%})")
+
+    fig=go.Figure(go.Treemap(
+        ids=ids,
+        labels=labels,
+        parents=parents,
+        values=values,
+        branchvalues='total',
+        customdata=custom,
+        text=text_display,
+        textinfo='text',
+        hovertemplate='<b>%{label}</b><br>$%{customdata[0]:,.2f} (%{customdata[1]:.1%})<extra></extra>',
+        root_color='lightgrey'
+    ))
+    fig.update_layout(
+        title='Mapa de gasto por categoría y subcategoría',
+        margin=dict(l=10,r=10,t=52,b=10)
     )
-    fig.update_layout(margin=dict(l=10,r=10,t=52,b=10))
     return fig
+
 authenticate()
 with st.sidebar:
     st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
@@ -420,25 +484,68 @@ if page=='Resumen':
         st.plotly_chart(horizontal_month_chart(view,'Principales categorías por mes'),use_container_width=True,config=PLOT_CONFIG)
 
     st.markdown('### Detalle por categoría y subcategoría')
-    st.caption('Te dejo dos vistas: una apilada para comparar composición y una alternativa tipo mapa para detectar de inmediato dónde se concentra el gasto.')
+    st.caption('Puedes acotar esta sección a uno o varios meses sin cambiar el filtro principal del Resumen.')
 
-    dc1,dc2=st.columns([1,1])
-    top_categories_detail=dc1.slider('Categorías a mostrar',min_value=5,max_value=15,value=10,key='top_categories_detail_sum')
-    top_subcategories_detail=dc2.slider('Subcategorías a destacar',min_value=5,max_value=20,value=12,key='top_subcategories_detail_sum')
+    detail_month_options=[MONTHS[m] for m in selected]
+    detail_month_names=st.multiselect(
+        'Meses del detalle',
+        detail_month_options,
+        default=detail_month_options,
+        key='detail_months_sum'
+    )
+    detail_month_nums=[MONTH_NUM[m] for m in detail_month_names]
 
-    tab1,tab2=st.tabs(['Gráfica apilada','Mapa de gasto'])
-    with tab1:
-        st.plotly_chart(
-            subcategory_stacked_chart(view,top_categories_detail,top_subcategories_detail),
-            use_container_width=True,
-            config=PLOT_CONFIG
+    detail_view=view[view['month'].isin(detail_month_nums)].copy() if detail_month_nums else view.iloc[0:0].copy()
+
+    reconciliation_detail=detail_view[detail_view['category']=='Conciliación Alzex'].copy()
+    detail_real=detail_view[detail_view['category']!='Conciliación Alzex'].copy()
+
+    if not reconciliation_detail.empty:
+        rec_total=float(reconciliation_detail['amount'].sum())
+        rec_by_month=(
+            reconciliation_detail.groupby('month_name',as_index=False).amount.sum()
         )
-    with tab2:
-        st.plotly_chart(
-            subcategory_treemap(view,top_categories_detail),
-            use_container_width=True,
-            config=PLOT_CONFIG
+        rec_text=' · '.join(f"{r['month_name']}: {money(r['amount'])}" for _,r in rec_by_month.iterrows())
+        st.info(
+            f'Ajuste de conciliación no categorizado: {money(rec_total)}. '
+            f'Es la diferencia necesaria para que el total mensual coincida con el Panorama general de Alzex, '
+            f'pero el CSV no trae suficiente detalle para asignarla a una categoría real. {rec_text}'
         )
+
+    if detail_real.empty:
+        st.info('Selecciona al menos un mes con movimientos categorizados.')
+    else:
+        dc1,dc2=st.columns([1,1])
+        max_cats=max(5,min(15,int(detail_real['category'].nunique())))
+        default_cats=min(10,max_cats)
+        top_categories_detail=dc1.slider(
+            'Categorías a mostrar',
+            min_value=5,
+            max_value=max_cats,
+            value=default_cats,
+            key='top_categories_detail_sum'
+        )
+        top_subcategories_detail=dc2.slider(
+            'Subcategorías a destacar',
+            min_value=5,
+            max_value=20,
+            value=12,
+            key='top_subcategories_detail_sum'
+        )
+
+        tab1,tab2=st.tabs(['Gráfica apilada','Mapa de gasto'])
+        with tab1:
+            st.plotly_chart(
+                subcategory_stacked_chart(detail_real,top_categories_detail,top_subcategories_detail),
+                use_container_width=True,
+                config=PLOT_CONFIG
+            )
+        with tab2:
+            st.plotly_chart(
+                subcategory_treemap(detail_real,top_categories_detail),
+                use_container_width=True,
+                config=PLOT_CONFIG
+            )
 elif page=='Tendencias y fugas':
     st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG);st.plotly_chart(vertical_composition(view,y_step),use_container_width=True,config=PLOT_CONFIG);current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});st.plotly_chart(all_categories_chart(view),use_container_width=True,config=PLOT_CONFIG)
 elif page=='Presupuesto':
