@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v22-puntos-vales-descarga-visible'
+APP_VERSION='2026.08.21-presupuesto-v23-extraordinarios-mapa-conceptos'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -423,6 +423,66 @@ def subcategory_treemap(view,top_categories=12):
     )
     return fig
 
+def extraordinary_treemap(extra_view):
+    data=extra_view.copy()
+    if data.empty:
+        return go.Figure()
+    data['month']=data['month'].fillna('Sin mes')
+    data['concept']=data['concept'].fillna('Sin concepto')
+    chart=data.groupby(['month_num','month','concept'],as_index=False).amount.sum().sort_values(['month_num','amount'],ascending=[True,False])
+
+    month_totals=(
+        chart.groupby(['month_num','month'],as_index=False).amount.sum()
+        .sort_values('month_num')
+    )
+    total=float(month_totals['amount'].sum())
+
+    ids=[];labels=[];parents=[];values=[];custom=[];text_display=[]
+
+    for _,row in month_totals.iterrows():
+        month=str(row['month'])
+        val=float(row['amount'])
+        pct=(val/total) if total else 0
+        ids.append(f"month::{month}")
+        labels.append(f"{month} · {money(val)} ({pct:.1%})")
+        parents.append('')
+        values.append(val)
+        custom.append([val,pct,'total'])
+        text_display.append(f"{month} · {money(val)} ({pct:.1%})")
+
+    month_map={(str(r['month'])):float(r['amount']) for _,r in month_totals.iterrows()}
+
+    for _,row in chart.iterrows():
+        month=str(row['month'])
+        concept=str(row['concept'])
+        val=float(row['amount'])
+        month_total=month_map.get(month,0.0)
+        pct=(val/month_total) if month_total else 0
+        ids.append(f"concept::{month}::{concept}")
+        labels.append(f"{concept} · {money(val)} ({pct:.1%})")
+        parents.append(f"month::{month}")
+        values.append(val)
+        custom.append([val,pct,month])
+        text_display.append(f"{concept}<br>{money(val)} ({pct:.1%})")
+
+    fig=go.Figure(go.Treemap(
+        ids=ids,
+        labels=labels,
+        parents=parents,
+        values=values,
+        branchvalues='total',
+        customdata=custom,
+        text=text_display,
+        textinfo='text',
+        hovertemplate='<b>%{label}</b><br>$%{customdata[0]:,.2f}<br>%{customdata[1]:.1%} de %{customdata[2]}<extra></extra>',
+        root_color='lightgrey'
+    ))
+    fig.update_layout(
+        title='Mapa de extraordinarios por mes y concepto',
+        margin=dict(l=10,r=10,t=52,b=10)
+    )
+    return fig
+
 authenticate()
 with st.sidebar:
     st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
@@ -565,7 +625,16 @@ elif page=='Tendencias y fugas':
 elif page=='Presupuesto':
     st.title('Presupuesto contra gasto real');st.caption('Comparación mensual o acumulada con categorías conciliadas');view,selected,label,year=period_filter(monthly,'bud');plan=budget.groupby('category').monthly_budget.sum()*len(selected);actual=view.groupby('category').amount.sum();comp=pd.concat([plan.rename('Presupuesto'),actual.rename('Real')],axis=1).fillna(0);comp['Variación']=comp.Real-comp.Presupuesto;comp['Ejercicio']=comp.Real/comp.Presupuesto.replace(0,pd.NA);comp=comp.reset_index().rename(columns={'category':'Categoría'}).sort_values('Variación',ascending=False);st.markdown('#### '+label);c1,c2,c3=st.columns(3);c1.metric('Presupuesto',money(comp.Presupuesto.sum()));c2.metric('Gasto real',money(comp.Real.sum()));c3.metric('Variación',money(comp.Variación.sum()),delta_color='inverse');display=comp.copy();display['Presupuesto']=display.Presupuesto.map(money);display['Real']=display.Real.map(money);display['Variación']=display.Variación.map(money);display['Ejercicio']=display.Ejercicio.map(lambda x:'—' if pd.isna(x) else f'{x:.1%}');styled=display.style.map(lambda v:f'color:{GREEN};font-weight:600' if str(v).startswith('$-') else f'color:{RED};font-weight:600',subset=['Variación']);st.dataframe(styled,hide_index=True,use_container_width=True)
 elif page=='Extraordinarios':
-    st.title('Gastos extraordinarios');years=sorted(extra.year.dropna().unique(),reverse=True);c1,c2=st.columns([1,3]);eyear=c1.selectbox('Año',years,key='extra_year');enames=[MONTHS[m] for m in sorted(extra.loc[extra.year==eyear,'month_num'].dropna().unique())];echosen=c2.multiselect('Meses a analizar',enames,default=enames,key='extra_months');emonths=[MONTH_NUM[m] for m in echosen];extra_view=extra[(extra.year==eyear)&(extra.month_num.isin(emonths))];st.metric('Total del periodo seleccionado',money(float(extra_view.amount.sum())))
+    st.title('Gastos extraordinarios')
+    years=sorted(extra.year.dropna().unique(),reverse=True)
+    c1,c2=st.columns([1,3])
+    eyear=c1.selectbox('Año',years,key='extra_year')
+    enames=[MONTHS[m] for m in sorted(extra.loc[extra.year==eyear,'month_num'].dropna().unique())]
+    echosen=c2.multiselect('Meses a analizar',enames,default=enames,key='extra_months')
+    emonths=[MONTH_NUM[m] for m in echosen]
+    extra_view=extra[(extra.year==eyear)&(extra.month_num.isin(emonths))]
+    st.metric('Total del periodo seleccionado',money(float(extra_view.amount.sum())))
+
     with st.expander('Agregar gasto extraordinario'):
         with st.form('extraordinary'):
             f1,f2,f3=st.columns([1,2,1]);date=f1.date_input('Fecha');concept=f2.text_input('Concepto');amount=f3.number_input('Importe',min_value=0.0,step=100.0);sent=st.form_submit_button('Agregar renglón',type='primary')
@@ -574,7 +643,22 @@ elif page=='Extraordinarios':
             else:
                 try:insert_one('extraordinary_expenses',{'expense_date':date.isoformat(),'concept':concept.strip(),'amount':amount});st.rerun()
                 except Exception as e:st.error(str(e))
-    show=extra_view.rename(columns={'month':'Mes','concept':'Concepto','amount':'Importe'})[['Mes','Concepto','Importe']];show['Importe']=show.Importe.map(money);st.dataframe(show.style.set_properties(subset=['Importe'],**{'text-align':'center'}),hide_index=True,use_container_width=True);chart=extra_view.groupby(['month_num','month'],as_index=False).amount.sum().sort_values('month_num');fig=px.bar(chart,x='month',y='amount',title='Gastos extraordinarios por mes',text_auto=',.0f',color='month',color_discrete_sequence=MONTH_COLORS,labels={'month':'Mes','amount':'Importe'});fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(texttemplate='$%{y:,.0f}',textposition='outside');render_chart(style(fig),'gastos_extraordinarios','chart_extraordinarios')
+
+    show=extra_view.rename(columns={'month':'Mes','concept':'Concepto','amount':'Importe'})[['Mes','Concepto','Importe']]
+    show['Importe']=show.Importe.map(money)
+    st.dataframe(show.style.set_properties(subset=['Importe'],**{'text-align':'center'}),hide_index=True,use_container_width=True)
+
+    tab1,tab2=st.tabs(['Barras por mes','Mapa por concepto'])
+    with tab1:
+        chart=extra_view.groupby(['month_num','month'],as_index=False).amount.sum().sort_values('month_num')
+        fig=px.bar(chart,x='month',y='amount',title='Gastos extraordinarios por mes',text_auto=',.0f',color='month',color_discrete_sequence=MONTH_COLORS,labels={'month':'Mes','amount':'Importe'})
+        fig.update_yaxes(tickprefix='$',tickformat=',.0f')
+        fig.update_traces(texttemplate='$%{y:,.0f}',textposition='outside')
+        render_chart(style(fig),'gastos_extraordinarios','chart_extraordinarios')
+    with tab2:
+        st.caption('Arriba se muestra el mes y dentro de cada bloque aparecen los conceptos correspondientes.')
+        render_chart(extraordinary_treemap(extra_view),'extraordinarios_por_mes_y_concepto','chart_extraordinarios_treemap')
+
 elif page=='Inversiones':
     st.title('Inversiones y rendimientos');st.caption('Registra valuaciones y movimientos de capital sin confundir aportaciones o retiros con rendimiento.');investments=pd.DataFrame(fetch('investments'));valuations=pd.DataFrame(fetch('investment_valuations'))
     try:
