@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v28-apartados-mensuales'
+APP_VERSION='2026.08.21-presupuesto-v29-apartados-fix-mes'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -685,15 +685,30 @@ elif page=='Apartados mensuales':
 
     current_year=pd.Timestamp.today().year
     r1,r2=st.columns([1,2])
-    reserve_year=r1.selectbox('Año',[2026,2027,2028,2029,2030],index=0 if current_year<=2026 else min(current_year-2026,4),key='reserve_year')
-    reserve_month_name=r2.selectbox('Calcular acumulado esperado hasta',list(MONTHS.values()),index=max(0,min(pd.Timestamp.today().month-1,11)),key='reserve_month')
+    reserve_year=r1.selectbox(
+        'Año',
+        [2026,2027,2028,2029,2030],
+        index=0 if current_year<=2026 else min(current_year-2026,4),
+        key='reserve_year'
+    )
+    reserve_month_name=r2.selectbox(
+        'Calcular acumulado esperado hasta',
+        list(MONTHS.values()),
+        index=max(0,min(pd.Timestamp.today().month-1,11)),
+        key='reserve_month'
+    )
     reserve_month=MONTH_NUM[reserve_month_name]
 
     reserve_df=load_monthly_reserves(reserve_year).copy()
-    visible_cols=['category','holder','monthly_amount','start_month','current_balance','active']
-    for col in visible_cols:
+
+    for col in ['category','holder','monthly_amount','start_month','current_balance','active']:
         if col not in reserve_df.columns:
             reserve_df[col]=0 if col in ['monthly_amount','current_balance'] else (1 if col=='start_month' else (True if col=='active' else ''))
+
+    reserve_df['start_month']=pd.to_numeric(reserve_df['start_month'],errors='coerce').fillna(1).astype(int)
+    reserve_df['start_month_name']=reserve_df['start_month'].map(MONTHS).fillna('Enero')
+
+    visible_cols=['category','holder','monthly_amount','start_month_name','current_balance','active']
 
     st.markdown('### Configuración')
     st.caption('Puedes agregar varias filas de una misma categoría si el apartado se divide entre Yani y Mariana.')
@@ -706,28 +721,54 @@ elif page=='Apartados mensuales':
         key=f'reserve_editor_{reserve_year}',
         column_config={
             'category':st.column_config.TextColumn('Categoría',width='large'),
-            'holder':st.column_config.SelectboxColumn('Quién lo debe tener',options=['Yani','Mariana'],required=True,width='medium'),
-            'monthly_amount':st.column_config.NumberColumn('Apartado mensual',min_value=0.0,step=50.0,format='$%.2f'),
-            'start_month':st.column_config.SelectboxColumn('Mes de inicio',options=list(range(1,13)),format_func=lambda x:MONTHS.get(x,str(x))),
-            'current_balance':st.column_config.NumberColumn('Saldo actual del apartado',min_value=0.0,step=50.0,format='$%.2f'),
+            'holder':st.column_config.SelectboxColumn(
+                'Quién lo debe tener',
+                options=['Yani','Mariana'],
+                required=True,
+                width='medium'
+            ),
+            'monthly_amount':st.column_config.NumberColumn(
+                'Apartado mensual',
+                min_value=0.0,
+                step=50.0,
+                format='$%.2f'
+            ),
+            'start_month_name':st.column_config.SelectboxColumn(
+                'Mes de inicio',
+                options=list(MONTHS.values()),
+                required=True,
+                width='medium'
+            ),
+            'current_balance':st.column_config.NumberColumn(
+                'Saldo actual del apartado',
+                min_value=0.0,
+                step=50.0,
+                format='$%.2f'
+            ),
             'active':st.column_config.CheckboxColumn('Activo')
         }
     )
 
+    # Convertimos el nombre del mes nuevamente a número antes de guardar/calcular.
+    edited_internal=edited.copy()
+    edited_internal['start_month']=edited_internal['start_month_name'].map(MONTH_NUM).fillna(1).astype(int)
+
     save_col,reset_col,_=st.columns([1,1,3])
     if save_col.button('Guardar apartados',type='primary',use_container_width=True):
         try:
-            count=save_monthly_reserves(reserve_year,edited)
+            count=save_monthly_reserves(reserve_year,edited_internal)
             st.success(f'{count} apartados guardados.')
             st.rerun()
         except Exception as e:
             st.error('No se pudieron guardar los apartados. '+str(e))
 
     if reset_col.button('Restaurar ejemplo inicial',use_container_width=True):
-        st.session_state[f'reserve_editor_{reserve_year}']=reserve_starter_rows(reserve_year)[visible_cols]
+        starter=reserve_starter_rows(reserve_year).copy()
+        starter['start_month_name']=starter['start_month'].map(MONTHS)
+        st.session_state[f'reserve_editor_{reserve_year}']=starter[visible_cols]
         st.rerun()
 
-    calc=edited.copy()
+    calc=edited_internal.copy()
     calc['monthly_amount']=pd.to_numeric(calc['monthly_amount'],errors='coerce').fillna(0.0)
     calc['current_balance']=pd.to_numeric(calc['current_balance'],errors='coerce').fillna(0.0)
     calc['start_month']=pd.to_numeric(calc['start_month'],errors='coerce').fillna(1).astype(int)
@@ -785,9 +826,11 @@ elif page=='Apartados mensuales':
         .sort_values('Deberia_tener',ascending=False)
     )
     cat_summary['Diferencia']=cat_summary['Saldo_actual']-cat_summary['Deberia_tener']
+
     cat_show=cat_summary.copy()
     for col in ['Apartado_mensual','Deberia_tener','Saldo_actual','Diferencia']:
         cat_show[col]=cat_show[col].map(money)
+
     st.dataframe(
         cat_show.rename(columns={
             'category':'Categoría',
@@ -802,8 +845,18 @@ elif page=='Apartados mensuales':
     if not cat_summary.empty:
         chart=cat_summary.sort_values('Deberia_tener')
         fig=go.Figure()
-        fig.add_bar(y=chart['category'],x=chart['Deberia_tener'],orientation='h',name='Deberíamos tener')
-        fig.add_bar(y=chart['category'],x=chart['Saldo_actual'],orientation='h',name='Saldo actual')
+        fig.add_bar(
+            y=chart['category'],
+            x=chart['Deberia_tener'],
+            orientation='h',
+            name='Deberíamos tener'
+        )
+        fig.add_bar(
+            y=chart['category'],
+            x=chart['Saldo_actual'],
+            orientation='h',
+            name='Saldo actual'
+        )
         fig.update_layout(
             title=f'Apartados esperados vs. saldo actual · {reserve_month_name} {reserve_year}',
             barmode='group',
@@ -811,7 +864,11 @@ elif page=='Apartados mensuales':
             margin=dict(l=10,r=10,t=52,b=10)
         )
         fig.update_xaxes(tickprefix='$',tickformat=',.0f',title='Monto')
-        render_chart(style(fig),'apartados_esperado_vs_actual','chart_apartados_esperado_actual')
+        render_chart(
+            style(fig),
+            'apartados_esperado_vs_actual',
+            'chart_apartados_esperado_actual'
+        )
 
 elif page=='Extraordinarios':
     st.title('Gastos extraordinarios')
