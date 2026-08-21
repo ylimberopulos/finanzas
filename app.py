@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v21-subcategoria-porcentaje-y-png'
+APP_VERSION='2026.08.21-presupuesto-v22-puntos-vales-descarga-visible'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -226,6 +226,17 @@ def change_color(v):
     return 'color:#15803D;font-weight:700' if n>0 else ('color:#DC2626;font-weight:700' if n<0 else '')
 def style(fig):
     fig.update_layout(font=dict(color=NAVY),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',margin=dict(l=10,r=10,t=52,b=10),legend_title_text='');fig.update_xaxes(gridcolor=GRID);fig.update_yaxes(gridcolor=GRID);return fig
+def render_chart(fig,filename,key):
+    """Muestra la gráfica y deja visible la opción de descarga PNG."""
+    cfg=dict(PLOT_CONFIG)
+    cfg['toImageButtonOptions']={
+        'format':'png',
+        'filename':filename,
+        'scale':2
+    }
+    st.plotly_chart(fig,use_container_width=True,config=cfg,key=key)
+    st.caption('📷 Descargar PNG: usa el icono de cámara en la barra de herramientas de la gráfica.')
+
 def db_movements():
     rows=fetch_all_rows('movements');df=pd.DataFrame(rows) if rows else initial_movements()
     if not df.empty:df['movement_date']=pd.to_datetime(df.movement_date);df['amount']=pd.to_numeric(df.amount)
@@ -426,7 +437,7 @@ with st.sidebar:
             st.session_state.pop('custom_budget',None);st.session_state['budget_upload_key']=upload_key+1;st.rerun()
         if st.session_state.get('custom_budget'):st.caption('Fuente activa: archivo cargado')
         else:st.caption('Fuente activa: presupuesto original')
-    st.caption('📷 Todas las gráficas se pueden descargar en PNG con el icono de cámara.');st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
+    st.caption('📷 Descarga PNG disponible en cada gráfica mediante el icono de cámara.');st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
     if st.button('Cerrar sesión',use_container_width=True):st.session_state.clear();st.rerun()
 monthly=analytical_monthly();budget=pd.DataFrame(st.session_state['custom_budget']) if st.session_state.get('custom_budget') else budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
 if page=='Resumen':
@@ -447,12 +458,53 @@ if page=='Resumen':
         int(m) for m in monthly.loc[monthly['year']==2026,'month'].dropna().unique()
     )
     st.caption('Meses disponibles en el análisis: '+', '.join(MONTHS[m] for m in _months_loaded))
-    view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
+    view,selected,label,year=period_filter(monthly,'sum')
+    spent=float(view.amount.sum())
+    target=monthly_budget*len(selected)
+    delta=spent-target
+    extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))]
+
+    st.markdown('#### '+label)
+    a,b,c,d=st.columns(4)
+    a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse')
+    b.metric('Presupuesto del periodo',money(target))
+    c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())))
+    d.metric('Promedio mensual',money(spent/max(1,len(selected))))
+
+    # Tarjetas por medio de pago, respetando meses y filtros de categoría/subcategoría del Resumen.
+    payment_mov=db_movements().copy()
+    if not payment_mov.empty:
+        payment_mov['movement_date']=pd.to_datetime(payment_mov['movement_date'],errors='coerce')
+        payment_mov['amount']=pd.to_numeric(payment_mov['amount'],errors='coerce').fillna(0)
+        payment_mov=payment_mov[
+            (payment_mov['movement_date'].dt.year==year) &
+            (payment_mov['movement_date'].dt.month.isin(selected))
+        ].copy()
+
+        chosen_cat=st.session_state.get('catssum',[])
+        chosen_sub=st.session_state.get('subssum',[])
+        if chosen_cat and 'category' in payment_mov.columns:
+            payment_mov=payment_mov[payment_mov['category'].isin(chosen_cat)]
+        if chosen_sub and 'subcategory' in payment_mov.columns:
+            payment_mov=payment_mov[payment_mov['subcategory'].fillna('Sin detalle').isin(chosen_sub)]
+
+        account_series=payment_mov.get('account',pd.Series('',index=payment_mov.index)).fillna('').astype(str).str.lower()
+        points_paid=float(payment_mov.loc[account_series.str.contains('punto',na=False),'amount'].sum())
+        vouchers_paid=float(payment_mov.loc[account_series.str.contains('vale',na=False),'amount'].sum())
+    else:
+        points_paid=0.0
+        vouchers_paid=0.0
+
+    p1,p2=st.columns(2)
+    p1.metric('Pagado con puntos',money(points_paid))
+    p2.metric('Pagado con vales',money(vouchers_paid))
+
+    (st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
     left,right=st.columns([1.35,1])
     with left:
-        trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);fig=px.bar(trend,x='month_name',y='amount',title='Gasto mensual',text_auto=',.0f',color='month_name',color_discrete_sequence=MONTH_COLORS,labels={'month_name':'Mes','amount':'Gasto'});fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text=f'Presupuesto {money(monthly_budget)}');fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_layout(showlegend=False);st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+        trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);fig=px.bar(trend,x='month_name',y='amount',title='Gasto mensual',text_auto=',.0f',color='month_name',color_discrete_sequence=MONTH_COLORS,labels={'month_name':'Mes','amount':'Gasto'});fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text=f'Presupuesto {money(monthly_budget)}');fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_layout(showlegend=False);render_chart(style(fig),'gasto_mensual','chart_resumen_gasto_mensual')
     with right:
-        st.plotly_chart(horizontal_month_chart(view,'Principales categorías por mes'),use_container_width=True,config=PLOT_CONFIG)
+        render_chart(horizontal_month_chart(view,'Principales categorías por mes'),'categorias_por_mes','chart_resumen_categorias')
 
     st.markdown('### Detalle por categoría y subcategoría')
     st.caption('Esta sección usa únicamente los movimientos respaldados por el CSV/Supabase. No hay ajustes manuales.')
@@ -494,46 +546,22 @@ if page=='Resumen':
 
         tab1,tab2=st.tabs(['Gráfica apilada','Mapa de gasto'])
         with tab1:
-            st.plotly_chart(
+            render_chart(
                 subcategory_stacked_chart(detail_view,top_categories_detail,top_subcategories_detail),
-                use_container_width=True,
-                config=PLOT_CONFIG
+                'detalle_subcategorias_apilada',
+                'chart_detalle_apilada'
             )
         with tab2:
-            st.plotly_chart(
+            render_chart(
                 subcategory_treemap(detail_view,top_categories_detail),
-                use_container_width=True,
-                config=PLOT_CONFIG
+                'mapa_gasto_subcategorias',
+                'chart_detalle_treemap'
             )
 
-        st.markdown('### Conciliación auditable del CSV')
-        st.caption('Aquí puedes revisar exactamente cuánto suma el archivo por mes y categoría. Si el Panorama de Alzex muestra otro total, la diferencia queda visible y no se inventa.')
 
-        audit=(
-            detail_view.groupby(['month','month_name','category'],as_index=False)
-            .amount.sum()
-            .sort_values(['month','amount'],ascending=[True,False])
-        )
-        audit['Importe']=audit['amount'].map(money)
-        audit_show=audit[['month_name','category','Importe']].rename(
-            columns={'month_name':'Mes','category':'Categoría'}
-        )
-        st.dataframe(audit_show,hide_index=True,use_container_width=True)
-
-        monthly_audit=(
-            detail_view.groupby(['month','month_name'],as_index=False)
-            .amount.sum()
-            .sort_values('month')
-        )
-        monthly_audit['Total respaldado por CSV']=monthly_audit['amount'].map(money)
-        st.table(
-            monthly_audit[['month_name','Total respaldado por CSV']]
-            .rename(columns={'month_name':'Mes'})
-            .set_index('Mes')
-        )
 
 elif page=='Tendencias y fugas':
-    st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG);st.plotly_chart(vertical_composition(view,y_step),use_container_width=True,config=PLOT_CONFIG);current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});st.plotly_chart(all_categories_chart(view),use_container_width=True,config=PLOT_CONFIG)
+    st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');render_chart(style(fig),'tendencia_mensual','chart_tendencia_mensual');render_chart(vertical_composition(view,y_step),'composicion_gasto_mes','chart_composicion_mes');current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});render_chart(all_categories_chart(view),'gasto_todas_categorias','chart_todas_categorias')
 elif page=='Presupuesto':
     st.title('Presupuesto contra gasto real');st.caption('Comparación mensual o acumulada con categorías conciliadas');view,selected,label,year=period_filter(monthly,'bud');plan=budget.groupby('category').monthly_budget.sum()*len(selected);actual=view.groupby('category').amount.sum();comp=pd.concat([plan.rename('Presupuesto'),actual.rename('Real')],axis=1).fillna(0);comp['Variación']=comp.Real-comp.Presupuesto;comp['Ejercicio']=comp.Real/comp.Presupuesto.replace(0,pd.NA);comp=comp.reset_index().rename(columns={'category':'Categoría'}).sort_values('Variación',ascending=False);st.markdown('#### '+label);c1,c2,c3=st.columns(3);c1.metric('Presupuesto',money(comp.Presupuesto.sum()));c2.metric('Gasto real',money(comp.Real.sum()));c3.metric('Variación',money(comp.Variación.sum()),delta_color='inverse');display=comp.copy();display['Presupuesto']=display.Presupuesto.map(money);display['Real']=display.Real.map(money);display['Variación']=display.Variación.map(money);display['Ejercicio']=display.Ejercicio.map(lambda x:'—' if pd.isna(x) else f'{x:.1%}');styled=display.style.map(lambda v:f'color:{GREEN};font-weight:600' if str(v).startswith('$-') else f'color:{RED};font-weight:600',subset=['Variación']);st.dataframe(styled,hide_index=True,use_container_width=True)
 elif page=='Extraordinarios':
@@ -546,7 +574,7 @@ elif page=='Extraordinarios':
             else:
                 try:insert_one('extraordinary_expenses',{'expense_date':date.isoformat(),'concept':concept.strip(),'amount':amount});st.rerun()
                 except Exception as e:st.error(str(e))
-    show=extra_view.rename(columns={'month':'Mes','concept':'Concepto','amount':'Importe'})[['Mes','Concepto','Importe']];show['Importe']=show.Importe.map(money);st.dataframe(show.style.set_properties(subset=['Importe'],**{'text-align':'center'}),hide_index=True,use_container_width=True);chart=extra_view.groupby(['month_num','month'],as_index=False).amount.sum().sort_values('month_num');fig=px.bar(chart,x='month',y='amount',title='Gastos extraordinarios por mes',text_auto=',.0f',color='month',color_discrete_sequence=MONTH_COLORS,labels={'month':'Mes','amount':'Importe'});fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(texttemplate='$%{y:,.0f}',textposition='outside');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+    show=extra_view.rename(columns={'month':'Mes','concept':'Concepto','amount':'Importe'})[['Mes','Concepto','Importe']];show['Importe']=show.Importe.map(money);st.dataframe(show.style.set_properties(subset=['Importe'],**{'text-align':'center'}),hide_index=True,use_container_width=True);chart=extra_view.groupby(['month_num','month'],as_index=False).amount.sum().sort_values('month_num');fig=px.bar(chart,x='month',y='amount',title='Gastos extraordinarios por mes',text_auto=',.0f',color='month',color_discrete_sequence=MONTH_COLORS,labels={'month':'Mes','amount':'Importe'});fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(texttemplate='$%{y:,.0f}',textposition='outside');render_chart(style(fig),'gastos_extraordinarios','chart_extraordinarios')
 elif page=='Inversiones':
     st.title('Inversiones y rendimientos');st.caption('Registra valuaciones y movimientos de capital sin confundir aportaciones o retiros con rendimiento.');investments=pd.DataFrame(fetch('investments'));valuations=pd.DataFrame(fetch('investment_valuations'))
     try:
@@ -902,7 +930,7 @@ elif page=='Inversiones':
                     autorange=True,
                     fixedrange=False
                 )
-                st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
+                render_chart(style(fig),f"inversion_{int(inv['id'])}",f"chart_inversion_{int(inv['id'])}")
 
                 if idx < len(investments)-1:
                     st.divider()
