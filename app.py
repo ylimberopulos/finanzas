@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v27-portafolio-escala-corregida'
+APP_VERSION='2026.08.21-presupuesto-v28-apartados-mensuales'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -483,9 +483,64 @@ def extraordinary_treemap(extra_view):
     )
     return fig
 
+def reserve_starter_rows(year):
+    """Configuración inicial basada en el esquema compartido por el usuario; todo es editable."""
+    return pd.DataFrame([
+        {'year':year,'category':'Hogar','holder':'Yani','monthly_amount':1400.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Transporte','holder':'Yani','monthly_amount':1675.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Transporte','holder':'Mariana','monthly_amount':0.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Salud','holder':'Mariana','monthly_amount':11900.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Servicios','holder':'Mariana','monthly_amount':1855.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Compras personales','holder':'Yani','monthly_amount':0.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Compras personales','holder':'Mariana','monthly_amount':0.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Ocio','holder':'Yani','monthly_amount':250.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Ocio','holder':'Mariana','monthly_amount':0.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Bienes Inmuebles','holder':'Yani','monthly_amount':5975.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Cuidados','holder':'Mariana','monthly_amount':100.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Ropa y Articulos Fara','holder':'Yani','monthly_amount':1550.0,'start_month':1,'current_balance':0.0,'active':True},
+        {'year':year,'category':'Ciencias','holder':'Yani','monthly_amount':1000.0,'start_month':1,'current_balance':0.0,'active':True},
+    ])
+
+def load_monthly_reserves(year):
+    try:
+        rows=client().table('monthly_reserves').select('*').eq('year',int(year)).order('category').order('holder').execute().data or []
+        if rows:
+            df=pd.DataFrame(rows)
+            for col in ['monthly_amount','current_balance']:
+                df[col]=pd.to_numeric(df[col],errors='coerce').fillna(0.0)
+            df['start_month']=pd.to_numeric(df['start_month'],errors='coerce').fillna(1).astype(int)
+            df['active']=df['active'].fillna(True).astype(bool)
+            return df
+        return reserve_starter_rows(year)
+    except Exception as e:
+        st.error('Falta crear la tabla monthly_reserves en Supabase. Ejecuta el query de apartados mensuales. '+str(e))
+        return reserve_starter_rows(year)
+
+def save_monthly_reserves(year,edited):
+    db=client()
+    db.table('monthly_reserves').delete().eq('year',int(year)).execute()
+    rows=[]
+    for _,r in edited.iterrows():
+        category=str(r.get('category','')).strip()
+        holder=str(r.get('holder','')).strip()
+        if not category or not holder:
+            continue
+        rows.append({
+            'year':int(year),
+            'category':category,
+            'holder':holder,
+            'monthly_amount':float(pd.to_numeric(r.get('monthly_amount',0),errors='coerce') or 0),
+            'start_month':int(pd.to_numeric(r.get('start_month',1),errors='coerce') or 1),
+            'current_balance':float(pd.to_numeric(r.get('current_balance',0),errors='coerce') or 0),
+            'active':bool(r.get('active',True)),
+        })
+    if rows:
+        insert_rows_batched('monthly_reserves',rows,batch_size=200)
+    return len(rows)
+
 authenticate()
 with st.sidebar:
-    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
+    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Apartados mensuales','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
     with st.expander('Cargar presupuesto mensual'):
         st.download_button('Descargar plantilla Excel',budget_template(),file_name='plantilla_presupuesto_mensual.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
         upload_key=st.session_state.get('budget_upload_key',0);budget_file=st.file_uploader('Excel con Categoría y Monto',type=['xlsx'],key=f'budget_file_{upload_key}')
@@ -624,6 +679,140 @@ elif page=='Tendencias y fugas':
     st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');render_chart(style(fig),'tendencia_mensual','chart_tendencia_mensual');render_chart(vertical_composition(view,y_step),'composicion_gasto_mes','chart_composicion_mes');current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});render_chart(all_categories_chart(view),'gasto_todas_categorias','chart_todas_categorias')
 elif page=='Presupuesto':
     st.title('Presupuesto contra gasto real');st.caption('Comparación mensual o acumulada con categorías conciliadas');view,selected,label,year=period_filter(monthly,'bud');plan=budget.groupby('category').monthly_budget.sum()*len(selected);actual=view.groupby('category').amount.sum();comp=pd.concat([plan.rename('Presupuesto'),actual.rename('Real')],axis=1).fillna(0);comp['Variación']=comp.Real-comp.Presupuesto;comp['Ejercicio']=comp.Real/comp.Presupuesto.replace(0,pd.NA);comp=comp.reset_index().rename(columns={'category':'Categoría'}).sort_values('Variación',ascending=False);st.markdown('#### '+label);c1,c2,c3=st.columns(3);c1.metric('Presupuesto',money(comp.Presupuesto.sum()));c2.metric('Gasto real',money(comp.Real.sum()));c3.metric('Variación',money(comp.Variación.sum()),delta_color='inverse');display=comp.copy();display['Presupuesto']=display.Presupuesto.map(money);display['Real']=display.Real.map(money);display['Variación']=display.Variación.map(money);display['Ejercicio']=display.Ejercicio.map(lambda x:'—' if pd.isna(x) else f'{x:.1%}');styled=display.style.map(lambda v:f'color:{GREEN};font-weight:600' if str(v).startswith('$-') else f'color:{RED};font-weight:600',subset=['Variación']);st.dataframe(styled,hide_index=True,use_container_width=True)
+elif page=='Apartados mensuales':
+    st.title('Apartados mensuales')
+    st.caption('Define cuánto apartar cada mes, quién debe resguardarlo y cuánto deberíamos tener acumulado a una fecha determinada.')
+
+    current_year=pd.Timestamp.today().year
+    r1,r2=st.columns([1,2])
+    reserve_year=r1.selectbox('Año',[2026,2027,2028,2029,2030],index=0 if current_year<=2026 else min(current_year-2026,4),key='reserve_year')
+    reserve_month_name=r2.selectbox('Calcular acumulado esperado hasta',list(MONTHS.values()),index=max(0,min(pd.Timestamp.today().month-1,11)),key='reserve_month')
+    reserve_month=MONTH_NUM[reserve_month_name]
+
+    reserve_df=load_monthly_reserves(reserve_year).copy()
+    visible_cols=['category','holder','monthly_amount','start_month','current_balance','active']
+    for col in visible_cols:
+        if col not in reserve_df.columns:
+            reserve_df[col]=0 if col in ['monthly_amount','current_balance'] else (1 if col=='start_month' else (True if col=='active' else ''))
+
+    st.markdown('### Configuración')
+    st.caption('Puedes agregar varias filas de una misma categoría si el apartado se divide entre Yani y Mariana.')
+
+    edited=st.data_editor(
+        reserve_df[visible_cols],
+        hide_index=True,
+        use_container_width=True,
+        num_rows='dynamic',
+        key=f'reserve_editor_{reserve_year}',
+        column_config={
+            'category':st.column_config.TextColumn('Categoría',width='large'),
+            'holder':st.column_config.SelectboxColumn('Quién lo debe tener',options=['Yani','Mariana'],required=True,width='medium'),
+            'monthly_amount':st.column_config.NumberColumn('Apartado mensual',min_value=0.0,step=50.0,format='$%.2f'),
+            'start_month':st.column_config.SelectboxColumn('Mes de inicio',options=list(range(1,13)),format_func=lambda x:MONTHS.get(x,str(x))),
+            'current_balance':st.column_config.NumberColumn('Saldo actual del apartado',min_value=0.0,step=50.0,format='$%.2f'),
+            'active':st.column_config.CheckboxColumn('Activo')
+        }
+    )
+
+    save_col,reset_col,_=st.columns([1,1,3])
+    if save_col.button('Guardar apartados',type='primary',use_container_width=True):
+        try:
+            count=save_monthly_reserves(reserve_year,edited)
+            st.success(f'{count} apartados guardados.')
+            st.rerun()
+        except Exception as e:
+            st.error('No se pudieron guardar los apartados. '+str(e))
+
+    if reset_col.button('Restaurar ejemplo inicial',use_container_width=True):
+        st.session_state[f'reserve_editor_{reserve_year}']=reserve_starter_rows(reserve_year)[visible_cols]
+        st.rerun()
+
+    calc=edited.copy()
+    calc['monthly_amount']=pd.to_numeric(calc['monthly_amount'],errors='coerce').fillna(0.0)
+    calc['current_balance']=pd.to_numeric(calc['current_balance'],errors='coerce').fillna(0.0)
+    calc['start_month']=pd.to_numeric(calc['start_month'],errors='coerce').fillna(1).astype(int)
+    calc['active']=calc['active'].fillna(True).astype(bool)
+    calc=calc[calc['active']].copy()
+
+    calc['months_elapsed']=calc['start_month'].apply(lambda m:max(0,reserve_month-int(m)+1))
+    calc['expected_balance']=calc['monthly_amount']*calc['months_elapsed']
+    calc['gap']=calc['current_balance']-calc['expected_balance']
+
+    monthly_total=float(calc['monthly_amount'].sum())
+    expected_total=float(calc['expected_balance'].sum())
+    current_total=float(calc['current_balance'].sum())
+    gap_total=current_total-expected_total
+
+    m1,m2,m3,m4=st.columns(4)
+    m1.metric('Apartado mensual total',money(monthly_total))
+    m2.metric(f'Deberíamos tener a {reserve_month_name}',money(expected_total))
+    m3.metric('Saldo actual registrado',money(current_total))
+    m4.metric('Diferencia vs. esperado',money(gap_total),delta=money(gap_total),delta_color='normal')
+
+    holder_summary=(
+        calc.groupby('holder',as_index=False)
+        .agg(
+            Apartado_mensual=('monthly_amount','sum'),
+            Deberia_tener=('expected_balance','sum'),
+            Saldo_actual=('current_balance','sum')
+        )
+    )
+    holder_summary['Diferencia']=holder_summary['Saldo_actual']-holder_summary['Deberia_tener']
+
+    st.markdown('### Resumen por persona')
+    holder_show=holder_summary.copy()
+    for col in ['Apartado_mensual','Deberia_tener','Saldo_actual','Diferencia']:
+        holder_show[col]=holder_show[col].map(money)
+    st.dataframe(
+        holder_show.rename(columns={
+            'holder':'Persona',
+            'Apartado_mensual':'Apartado mensual',
+            'Deberia_tener':f'Debería tener a {reserve_month_name}',
+            'Saldo_actual':'Saldo actual'
+        }),
+        hide_index=True,
+        use_container_width=True
+    )
+
+    st.markdown('### Detalle por categoría')
+    cat_summary=(
+        calc.groupby('category',as_index=False)
+        .agg(
+            Apartado_mensual=('monthly_amount','sum'),
+            Deberia_tener=('expected_balance','sum'),
+            Saldo_actual=('current_balance','sum')
+        )
+        .sort_values('Deberia_tener',ascending=False)
+    )
+    cat_summary['Diferencia']=cat_summary['Saldo_actual']-cat_summary['Deberia_tener']
+    cat_show=cat_summary.copy()
+    for col in ['Apartado_mensual','Deberia_tener','Saldo_actual','Diferencia']:
+        cat_show[col]=cat_show[col].map(money)
+    st.dataframe(
+        cat_show.rename(columns={
+            'category':'Categoría',
+            'Apartado_mensual':'Apartado mensual',
+            'Deberia_tener':f'Debería tener a {reserve_month_name}',
+            'Saldo_actual':'Saldo actual'
+        }),
+        hide_index=True,
+        use_container_width=True
+    )
+
+    if not cat_summary.empty:
+        chart=cat_summary.sort_values('Deberia_tener')
+        fig=go.Figure()
+        fig.add_bar(y=chart['category'],x=chart['Deberia_tener'],orientation='h',name='Deberíamos tener')
+        fig.add_bar(y=chart['category'],x=chart['Saldo_actual'],orientation='h',name='Saldo actual')
+        fig.update_layout(
+            title=f'Apartados esperados vs. saldo actual · {reserve_month_name} {reserve_year}',
+            barmode='group',
+            height=max(420,38*len(chart)),
+            margin=dict(l=10,r=10,t=52,b=10)
+        )
+        fig.update_xaxes(tickprefix='$',tickformat=',.0f',title='Monto')
+        render_chart(style(fig),'apartados_esperado_vs_actual','chart_apartados_esperado_actual')
+
 elif page=='Extraordinarios':
     st.title('Gastos extraordinarios')
     years=sorted(extra.year.dropna().unique(),reverse=True)
