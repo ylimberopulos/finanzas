@@ -4,9 +4,9 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v20-parser-suma-correcto'
+APP_VERSION='2026.08.21-presupuesto-v21-subcategoria-porcentaje-y-png'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
-PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
+PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
 def authenticate():
     expected=st.secrets.get('APP_PASSWORD','')
@@ -310,8 +310,11 @@ def subcategory_stacked_chart(view,top_categories=10,top_subcategories=12):
         data.groupby(['category','subcategory_plot'],as_index=False)
         .amount.sum()
     )
-    total_detail=float(chart['amount'].sum())
-    chart['pct_total']=chart['amount']/total_detail if total_detail else 0
+    category_totals=chart.groupby('category')['amount'].sum().to_dict()
+    chart['pct_category']=chart.apply(
+        lambda r: (r['amount']/category_totals.get(r['category'],0)) if category_totals.get(r['category'],0) else 0,
+        axis=1
+    )
     category_order=list(chart.groupby('category').amount.sum().sort_values(ascending=True).index)
     fig=px.bar(
         chart,
@@ -323,10 +326,10 @@ def subcategory_stacked_chart(view,top_categories=10,top_subcategories=12):
         title='Detalle por categoría y subcategoría',
         labels={'amount':'Gasto','category':'Categoría','subcategory_plot':'Subcategoría'},
         category_orders={'category':category_order},
-        custom_data=['pct_total']
+        custom_data=['pct_category','category']
     )
     fig.update_traces(
-        hovertemplate='<b>%{fullData.name}</b><br>$%{x:,.2f} (%{customdata[0]:.1%})<extra></extra>'
+        hovertemplate='<b>%{fullData.name}</b><br>$%{x:,.2f}<br>%{customdata[0]:.1%} de %{customdata[1]}<extra></extra>'
     )
     fig.update_xaxes(tickprefix='$',tickformat=',.0f')
     totals=chart.groupby('category',as_index=False).amount.sum()
@@ -356,6 +359,7 @@ def subcategory_treemap(view,top_categories=12):
         chart.groupby('category',as_index=False).amount.sum()
         .sort_values('amount',ascending=False)
     )
+    cat_map={str(r['category']):float(r['amount']) for _,r in cat_totals.iterrows()}
 
     ids=[]
     labels=[]
@@ -364,30 +368,31 @@ def subcategory_treemap(view,top_categories=12):
     custom=[]
     text_display=[]
 
-    # Franja superior de cada categoría: nombre + $ absoluto + % del total seleccionado.
+    # Categorías: total absoluto + % del total mostrado.
     for _,row in cat_totals.iterrows():
         cat=str(row['category'])
         val=float(row['amount'])
-        pct=(val/grand_total) if grand_total else 0
+        pct_total=(val/grand_total) if grand_total else 0
         ids.append(f"cat::{cat}")
-        labels.append(f"{cat} · {money(val)} ({pct:.1%})")
+        labels.append(f"{cat} · {money(val)} ({pct_total:.1%})")
         parents.append('')
         values.append(val)
-        custom.append([val,pct])
-        text_display.append(f"{cat} · {money(val)} ({pct:.1%})")
+        custom.append([val,pct_total,'total'])
+        text_display.append(f"{cat} · {money(val)} ({pct_total:.1%})")
 
-    # Subcategorías: nombre + $ absoluto + % del total seleccionado.
+    # Subcategorías: % respecto al total de su categoría.
     for _,row in chart.iterrows():
         cat=str(row['category'])
         sub=str(row['subcategory'])
         val=float(row['amount'])
-        pct=(val/grand_total) if grand_total else 0
+        cat_total=cat_map.get(cat,0.0)
+        pct_category=(val/cat_total) if cat_total else 0
         ids.append(f"sub::{cat}::{sub}")
-        labels.append(f"{sub} · {money(val)} ({pct:.1%})")
+        labels.append(f"{sub} · {money(val)} ({pct_category:.1%})")
         parents.append(f"cat::{cat}")
         values.append(val)
-        custom.append([val,pct])
-        text_display.append(f"{sub}<br>{money(val)} ({pct:.1%})")
+        custom.append([val,pct_category,cat])
+        text_display.append(f"{sub}<br>{money(val)} ({pct_category:.1%})")
 
     fig=go.Figure(go.Treemap(
         ids=ids,
@@ -398,7 +403,7 @@ def subcategory_treemap(view,top_categories=12):
         customdata=custom,
         text=text_display,
         textinfo='text',
-        hovertemplate='<b>%{label}</b><br>$%{customdata[0]:,.2f} (%{customdata[1]:.1%})<extra></extra>',
+        hovertemplate='<b>%{label}</b><br>$%{customdata[0]:,.2f}<br>%{customdata[1]:.1%} de %{customdata[2]}<extra></extra>',
         root_color='lightgrey'
     ))
     fig.update_layout(
@@ -421,7 +426,7 @@ with st.sidebar:
             st.session_state.pop('custom_budget',None);st.session_state['budget_upload_key']=upload_key+1;st.rerun()
         if st.session_state.get('custom_budget'):st.caption('Fuente activa: archivo cargado')
         else:st.caption('Fuente activa: presupuesto original')
-    st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
+    st.caption('📷 Todas las gráficas se pueden descargar en PNG con el icono de cámara.');st.caption('🔒 Datos privados');st.caption('Versión '+APP_VERSION)
     if st.button('Cerrar sesión',use_container_width=True):st.session_state.clear();st.rerun()
 monthly=analytical_monthly();budget=pd.DataFrame(st.session_state['custom_budget']) if st.session_state.get('custom_budget') else budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
 if page=='Resumen':
@@ -451,6 +456,7 @@ if page=='Resumen':
 
     st.markdown('### Detalle por categoría y subcategoría')
     st.caption('Esta sección usa únicamente los movimientos respaldados por el CSV/Supabase. No hay ajustes manuales.')
+    st.caption('Puedes descargar cualquiera de estas gráficas en PNG con el icono de cámara que aparece arriba a la derecha de cada visualización.')
 
     detail_month_options=[MONTHS[m] for m in selected]
     detail_month_names=st.multiselect(
