@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.20-presupuesto-v8-fix-form-callback'
+APP_VERSION='2026.08.21-presupuesto-v9-fix-import-nan'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -33,6 +33,36 @@ def initial_movements():
     p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
 def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
 def money(v):return f'${v:,.2f}' if abs(v-round(v))>.001 else f'${v:,.0f}'
+
+def clean_json_value(value):
+    """Convierte valores de pandas/numpy a tipos seguros para JSON/Supabase."""
+    import math
+    import numpy as np
+
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        return None if math.isnan(value) or math.isinf(value) else value
+    if isinstance(value, np.bool_):
+        return bool(value)
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return value
+
+def clean_records_for_json(df):
+    return [
+        {key: clean_json_value(value) for key, value in row.items()}
+        for row in df.to_dict(orient='records')
+    ]
+
 def parse_money_input(value):
     cleaned=str(value or '').replace('$','').replace(',','').strip()
     if not cleaned:return None
@@ -522,5 +552,17 @@ else:
     if uploaded:
         try:
             parsed=parse_alzex(uploaded.getvalue(),uploaded.name);existing={r['fingerprint'] for r in fetch('movements')};new=parsed[~parsed.fingerprint.isin(existing)];c1,c2,c3=st.columns(3);c1.metric('Movimientos válidos',f'{len(parsed):,}');c2.metric('Nuevos',f'{len(new):,}');c3.metric('Duplicados',f'{len(parsed)-len(new):,}');st.dataframe(new.head(50),use_container_width=True,hide_index=True)
-            if st.button('Confirmar importación',type='primary',disabled=new.empty):insert_rows('movements',new.where(pd.notna(new),None).to_dict('records'));insert_one('imports',{'file_name':uploaded.name,'row_count':len(parsed),'new_rows':len(new),'duplicate_rows':len(parsed)-len(new)});st.success('Importación completada');st.cache_data.clear();st.rerun()
-        except Exception as e:st.error(f'No se pudo leer el archivo: {e}')
+            if st.button('Confirmar importación',type='primary',disabled=new.empty):
+                clean_rows=clean_records_for_json(new)
+                insert_rows('movements',clean_rows)
+                insert_one('imports',{
+                    'file_name':uploaded.name,
+                    'row_count':int(len(parsed)),
+                    'new_rows':int(len(new)),
+                    'duplicate_rows':int(len(parsed)-len(new))
+                })
+                st.success('Importación completada')
+                st.cache_data.clear()
+                st.rerun()
+        except Exception as e:
+            st.error(f'No se pudo completar la importación: {e}')
