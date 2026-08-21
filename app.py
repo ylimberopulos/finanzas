@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v19-auditable-sin-ajustes'
+APP_VERSION='2026.08.21-presupuesto-v20-parser-suma-correcto'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -44,35 +44,38 @@ def _read_alzex_raw(file_bytes):
     raise ValueError(f'No se pudo leer el CSV original de Alzex: {last_error}')
 
 def parse_alzex(file_bytes,file_name):
-    """Parser local: conserva únicamente egresos (Suma < 0) y usa abs(Suma) como gasto."""
+    """Parser local: usa la categorización del importador base, pero el gasto SIEMPRE sale de Suma."""
     parsed=_parse_alzex_base(file_bytes,file_name).copy()
     raw=_read_alzex_raw(file_bytes).copy()
 
     raw['movement_date']=pd.to_datetime(raw['Fecha'],format='%d/%m/%y',errors='coerce')
-    raw['Precio']=pd.to_numeric(raw['Precio'],errors='coerce')
     raw['Suma']=pd.to_numeric(raw['Suma'],errors='coerce')
     raw['description_key']=raw['Descripción'].fillna('').astype(str).str.strip()
     raw['date_key']=raw['movement_date'].dt.strftime('%Y-%m-%d')
-    raw['price_key']=raw['Precio'].abs().round(2)
-    raw['_occ']=raw.groupby(['description_key','date_key','price_key'],dropna=False).cumcount()
 
     parsed['movement_date']=pd.to_datetime(parsed['movement_date'],errors='coerce')
     parsed['description_key']=parsed['description'].fillna('').astype(str).str.strip()
     parsed['date_key']=parsed['movement_date'].dt.strftime('%Y-%m-%d')
-    parsed['price_key']=pd.to_numeric(parsed['amount'],errors='coerce').abs().round(2)
-    parsed['_occ']=parsed.groupby(['description_key','date_key','price_key'],dropna=False).cumcount()
 
-    signed=raw[['description_key','date_key','price_key','_occ','Suma','Cuenta']].copy()
+    # IMPORTANTE:
+    # No usamos Precio para empatar registros porque en Alzex Precio y Suma pueden ser distintos.
+    # Ejemplos reales: Tefy, Fresko, Don Miguelon, etc.
+    # Usamos descripción + fecha + orden de aparición del movimiento en ese día.
+    raw['_occ']=raw.groupby(['description_key','date_key'],dropna=False).cumcount()
+    parsed['_occ']=parsed.groupby(['description_key','date_key'],dropna=False).cumcount()
+
+    signed=raw[['description_key','date_key','_occ','Suma']].copy()
     merged=parsed.merge(
         signed,
-        on=['description_key','date_key','price_key','_occ'],
+        on=['description_key','date_key','_occ'],
         how='left'
     )
 
+    # Gasto real = únicamente movimientos con Suma negativa.
     merged=merged[merged['Suma'].notna() & (merged['Suma']<0)].copy()
     merged['amount']=merged['Suma'].abs().astype(float)
 
-    drop_cols=['description_key','date_key','price_key','_occ','Suma','Cuenta']
+    drop_cols=['description_key','date_key','_occ','Suma']
     return merged.drop(columns=[c for c in drop_cols if c in merged.columns])
 
 def alzex_reconciliation(file_bytes):
