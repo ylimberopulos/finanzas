@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v13-import-month-diagnostics'
+APP_VERSION='2026.08.21-presupuesto-v14-agosto-directo-supabase'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -129,10 +129,39 @@ def db_movements():
     if not df.empty:df['movement_date']=pd.to_datetime(df.movement_date);df['amount']=pd.to_numeric(df.amount)
     return df
 def analytical_monthly():
-    base=compiled_data().copy();mov=db_movements()
+    # Si Supabase tiene movimientos, esa es la fuente principal y completa.
+    # El consolidado Excel queda únicamente como respaldo cuando la BD está vacía.
+    mov=db_movements()
+
     if not mov.empty:
-        mov['subcategory']=mov.get('subcategory','Sin detalle').fillna('').replace('','Sin detalle');tx=mov.assign(year=mov.movement_date.dt.year,month=mov.movement_date.dt.month,month_name=mov.movement_date.dt.month.map(MONTHS)).groupby(['year','month','month_name','category','subcategory'],as_index=False).amount.sum();tx['source']='Alzex';keys=set(zip(tx.year,tx.month));base=base[~base[['year','month']].apply(tuple,axis=1).isin(keys)];base=pd.concat([base,tx],ignore_index=True)
-    return base
+        mov=mov.copy()
+        mov['movement_date']=pd.to_datetime(mov['movement_date'],errors='coerce')
+        mov['amount']=pd.to_numeric(mov['amount'],errors='coerce')
+        mov=mov.dropna(subset=['movement_date','amount'])
+
+        if 'category' not in mov.columns:
+            mov['category']='Sin clasificar'
+        mov['category']=mov['category'].fillna('').astype(str).str.strip().replace('','Sin clasificar')
+
+        if 'subcategory' not in mov.columns:
+            mov['subcategory']='Sin detalle'
+        mov['subcategory']=mov['subcategory'].fillna('').astype(str).str.strip().replace('','Sin detalle')
+
+        mov['year']=mov['movement_date'].dt.year.astype(int)
+        mov['month']=mov['movement_date'].dt.month.astype(int)
+        mov['month_name']=mov['month'].map(MONTHS)
+
+        tx=(
+            mov.groupby(
+                ['year','month','month_name','category','subcategory'],
+                as_index=False,
+                dropna=False
+            )['amount'].sum()
+        )
+        tx['source']='Alzex'
+        return tx
+
+    return compiled_data().copy()
 def period_filter(df,key):
     years=sorted(df.year.unique(),reverse=True);c1,c2=st.columns([1,3]);year=c1.selectbox('Año',years,key='y'+key);available=sorted(df.loc[df.year==year,'month'].unique());names=[MONTHS[m] for m in available];chosen=c2.multiselect('Meses a analizar',names,default=names,key='months'+key);selected=sorted(MONTH_NUM[m] for m in chosen)
     if not selected:st.info('Selecciona al menos un mes.');st.stop()
@@ -190,6 +219,10 @@ if page=='Resumen':
                 st.warning('Supabase todavía no contiene movimientos de agosto. El problema no está en el selector: agosto no está llegando a la tabla movements.')
     else:
         st.warning('No hay movimientos guardados en Supabase.')
+    _months_loaded=sorted(
+        int(m) for m in monthly.loc[monthly['year']==2026,'month'].dropna().unique()
+    )
+    st.caption('Meses disponibles en el análisis: '+', '.join(MONTHS[m] for m in _months_loaded))
     view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
     left,right=st.columns([1.35,1])
     with left:
@@ -614,11 +647,7 @@ else:
             st.info(f"Supabase: {len(db_df):,} movimientos · última fecha guardada: {latest_date}")
 
             st.markdown('#### Movimientos guardados en Supabase por mes')
-            st.dataframe(
-                db_monthly[['Año','Mes','Movimientos']],
-                hide_index=True,
-                use_container_width=True
-            )
+            st.table(db_monthly[['Año','Mes','Movimientos']].set_index('Año'))
         else:
             st.warning('Hay registros en Supabase, pero sus fechas no se pudieron interpretar.')
     else:
@@ -654,11 +683,7 @@ else:
             c3.metric('Duplicados',f'{len(parsed)-len(new):,}')
 
             st.markdown('#### Movimientos detectados en el CSV por mes')
-            st.dataframe(
-                parsed_monthly[['Año','Mes','Movimientos']],
-                hide_index=True,
-                use_container_width=True
-            )
+            st.table(parsed_monthly[['Año','Mes','Movimientos']].set_index('Año'))
 
             if not parsed_diag.empty:
                 st.caption(
@@ -707,11 +732,7 @@ else:
                         )
 
                         st.markdown('#### Verificación después de guardar')
-                        st.dataframe(
-                            verify_monthly[['Año','Mes','Movimientos']],
-                            hide_index=True,
-                            use_container_width=True
-                        )
+                        st.table(verify_monthly[['Año','Mes','Movimientos']].set_index('Año'))
 
                         aug_count=int(
                             verify_valid.loc[
