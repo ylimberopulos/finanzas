@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v9-fix-import-nan'
+APP_VERSION='2026.08.21-presupuesto-v13-import-month-diagnostics'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -33,6 +33,32 @@ def initial_movements():
     p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
 def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
 def money(v):return f'${v:,.2f}' if abs(v-round(v))>.001 else f'${v:,.0f}'
+
+def fetch_all_rows(table_name,page_size=1000):
+    """Lee TODOS los registros de Supabase, evitando el límite de 1,000 filas por consulta."""
+    db=client()
+    rows=[]
+    start=0
+    while True:
+        response=db.table(table_name).select('*').range(start,start+page_size-1).execute()
+        batch=response.data or []
+        rows.extend(batch)
+        if len(batch)<page_size:
+            break
+        start+=page_size
+    return rows
+
+def insert_rows_batched(table_name,rows,batch_size=500):
+    """Inserta registros en lotes pequeños y devuelve cuántos se insertaron."""
+    if not rows:
+        return 0
+    db=client()
+    inserted=0
+    for i in range(0,len(rows),batch_size):
+        batch=rows[i:i+batch_size]
+        response=db.table(table_name).insert(batch).execute()
+        inserted+=len(response.data or batch)
+    return inserted
 
 def clean_json_value(value):
     """Convierte valores de pandas/numpy a tipos seguros para JSON/Supabase."""
@@ -99,7 +125,7 @@ def change_color(v):
 def style(fig):
     fig.update_layout(font=dict(color=NAVY),paper_bgcolor='rgba(0,0,0,0)',plot_bgcolor='rgba(0,0,0,0)',margin=dict(l=10,r=10,t=52,b=10),legend_title_text='');fig.update_xaxes(gridcolor=GRID);fig.update_yaxes(gridcolor=GRID);return fig
 def db_movements():
-    rows=fetch('movements');df=pd.DataFrame(rows) if rows else initial_movements()
+    rows=fetch_all_rows('movements');df=pd.DataFrame(rows) if rows else initial_movements()
     if not df.empty:df['movement_date']=pd.to_datetime(df.movement_date);df['amount']=pd.to_numeric(df.amount)
     return df
 def analytical_monthly():
@@ -151,7 +177,20 @@ with st.sidebar:
     if st.button('Cerrar sesión',use_container_width=True):st.session_state.clear();st.rerun()
 monthly=analytical_monthly();budget=pd.DataFrame(st.session_state['custom_budget']) if st.session_state.get('custom_budget') else budget_data();extra=extraordinary_all();monthly_budget=float(budget.monthly_budget.sum())
 if page=='Resumen':
-    st.title('Resumen financiero');st.caption('Dónde estás parado, qué se está desviando y dónde hay fugas');view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
+    st.title('Resumen financiero');st.caption('Dónde estás parado, qué se está desviando y dónde hay fugas')
+    _db_rows=fetch_all_rows('movements')
+    if _db_rows:
+        _db_df=pd.DataFrame(_db_rows)
+        _db_df['movement_date']=pd.to_datetime(_db_df['movement_date'],errors='coerce')
+        _valid_dates=_db_df['movement_date'].dropna()
+        if not _valid_dates.empty:
+            _latest=_valid_dates.max()
+            st.caption(f"Movimientos en Supabase: {len(_db_df):,} · última fecha guardada: {_latest.date().isoformat()}")
+            if _latest.year==2026 and _latest.month<8:
+                st.warning('Supabase todavía no contiene movimientos de agosto. El problema no está en el selector: agosto no está llegando a la tabla movements.')
+    else:
+        st.warning('No hay movimientos guardados en Supabase.')
+    view,selected,label,year=period_filter(monthly,'sum');spent=float(view.amount.sum());target=monthly_budget*len(selected);delta=spent-target;extra_period=extra[(extra.year==year)&(extra.month_num.isin(selected))];st.markdown('#### '+label);a,b,c,d=st.columns(4);a.metric('Gasto registrado',money(spent),f'{money(delta)} vs. presupuesto',delta_color='inverse');b.metric('Presupuesto del periodo',money(target));c.metric('Extraordinarios del periodo',money(float(extra_period.amount.sum())));d.metric('Promedio mensual',money(spent/max(1,len(selected))));(st.warning if delta>0 else st.success)(f"El gasto está {money(abs(delta))} {'arriba' if delta>0 else 'debajo'} del presupuesto.")
     left,right=st.columns([1.35,1])
     with left:
         trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);fig=px.bar(trend,x='month_name',y='amount',title='Gasto mensual',text_auto=',.0f',color='month_name',color_discrete_sequence=MONTH_COLORS,labels={'month_name':'Mes','amount':'Gasto'});fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text=f'Presupuesto {money(monthly_budget)}');fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_layout(showlegend=False);st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
@@ -548,21 +587,150 @@ elif page=='Inversiones':
                 saved=insert_one('investments',{'institution':institution,'product':product,'owner':owner,'asset_type':asset,'balance':balance,'annual_rate':rate,'opened_on':opened.isoformat()});inv_id=saved[0]['id'] if isinstance(saved,list) else saved['id'];insert_one('investment_valuations',{'investment_id':inv_id,'valuation_date':opened.isoformat(),'value':balance,'notes':'Valuación inicial'});st.success('Inversión guardada');st.rerun()
             except Exception as e:st.error(str(e))
 else:
-    st.title('Importar movimientos de Alzex');st.write('Carga un CSV completo o mensual. La huella de cada movimiento evita duplicados.');uploaded=st.file_uploader('Archivo CSV',type=['csv'])
+    st.title('Importar movimientos de Alzex')
+    st.write('Carga un CSV completo o mensual. La huella de cada movimiento evita duplicados.')
+
+    # 1) Qué hay HOY en Supabase, por mes.
+    db_rows=fetch_all_rows('movements')
+    db_df=pd.DataFrame(db_rows) if db_rows else pd.DataFrame()
+
+    if not db_df.empty and 'movement_date' in db_df.columns:
+        db_df['movement_date']=pd.to_datetime(db_df['movement_date'],errors='coerce')
+        db_valid=db_df.dropna(subset=['movement_date']).copy()
+
+        if not db_valid.empty:
+            db_valid['Año']=db_valid['movement_date'].dt.year
+            db_valid['Mes_num']=db_valid['movement_date'].dt.month
+            db_valid['Mes']=db_valid['Mes_num'].map(MONTHS)
+
+            db_monthly=(
+                db_valid.groupby(['Año','Mes_num','Mes'],as_index=False)
+                .size()
+                .rename(columns={'size':'Movimientos'})
+                .sort_values(['Año','Mes_num'])
+            )
+
+            latest_date=db_valid['movement_date'].max().date().isoformat()
+            st.info(f"Supabase: {len(db_df):,} movimientos · última fecha guardada: {latest_date}")
+
+            st.markdown('#### Movimientos guardados en Supabase por mes')
+            st.dataframe(
+                db_monthly[['Año','Mes','Movimientos']],
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.warning('Hay registros en Supabase, pero sus fechas no se pudieron interpretar.')
+    else:
+        st.warning('Supabase no tiene movimientos guardados todavía.')
+
+    uploaded=st.file_uploader('Archivo CSV',type=['csv'])
+
     if uploaded:
         try:
-            parsed=parse_alzex(uploaded.getvalue(),uploaded.name);existing={r['fingerprint'] for r in fetch('movements')};new=parsed[~parsed.fingerprint.isin(existing)];c1,c2,c3=st.columns(3);c1.metric('Movimientos válidos',f'{len(parsed):,}');c2.metric('Nuevos',f'{len(new):,}');c3.metric('Duplicados',f'{len(parsed)-len(new):,}');st.dataframe(new.head(50),use_container_width=True,hide_index=True)
+            parsed=parse_alzex(uploaded.getvalue(),uploaded.name)
+
+            # 2) Qué detecta parse_alzex en el CSV, por mes.
+            parsed_diag=parsed.copy()
+            parsed_diag['movement_date']=pd.to_datetime(parsed_diag['movement_date'],errors='coerce')
+            parsed_diag=parsed_diag.dropna(subset=['movement_date'])
+            parsed_diag['Año']=parsed_diag['movement_date'].dt.year
+            parsed_diag['Mes_num']=parsed_diag['movement_date'].dt.month
+            parsed_diag['Mes']=parsed_diag['Mes_num'].map(MONTHS)
+
+            parsed_monthly=(
+                parsed_diag.groupby(['Año','Mes_num','Mes'],as_index=False)
+                .size()
+                .rename(columns={'size':'Movimientos'})
+                .sort_values(['Año','Mes_num'])
+            )
+
+            existing={r['fingerprint'] for r in fetch_all_rows('movements') if r.get('fingerprint')}
+            new=parsed[~parsed.fingerprint.isin(existing)].copy()
+
+            c1,c2,c3=st.columns(3)
+            c1.metric('Movimientos válidos',f'{len(parsed):,}')
+            c2.metric('Nuevos',f'{len(new):,}')
+            c3.metric('Duplicados',f'{len(parsed)-len(new):,}')
+
+            st.markdown('#### Movimientos detectados en el CSV por mes')
+            st.dataframe(
+                parsed_monthly[['Año','Mes','Movimientos']],
+                hide_index=True,
+                use_container_width=True
+            )
+
+            if not parsed_diag.empty:
+                st.caption(
+                    f"CSV procesado desde {parsed_diag['movement_date'].min().date().isoformat()} "
+                    f"hasta {parsed_diag['movement_date'].max().date().isoformat()}."
+                )
+
+            st.markdown('#### Vista previa de movimientos nuevos')
+            st.dataframe(new.head(50),use_container_width=True,hide_index=True)
+
             if st.button('Confirmar importación',type='primary',disabled=new.empty):
                 clean_rows=clean_records_for_json(new)
-                insert_rows('movements',clean_rows)
+                inserted_count=insert_rows_batched('movements',clean_rows,batch_size=400)
+
                 insert_one('imports',{
                     'file_name':uploaded.name,
                     'row_count':int(len(parsed)),
                     'new_rows':int(len(new)),
                     'duplicate_rows':int(len(parsed)-len(new))
                 })
-                st.success('Importación completada')
+
+                # 3) Verificación DESPUÉS de guardar, por mes.
+                verify_rows=fetch_all_rows('movements')
+                verify_df=pd.DataFrame(verify_rows) if verify_rows else pd.DataFrame()
+
+                if not verify_df.empty and 'movement_date' in verify_df.columns:
+                    verify_df['movement_date']=pd.to_datetime(verify_df['movement_date'],errors='coerce')
+                    verify_valid=verify_df.dropna(subset=['movement_date']).copy()
+
+                    if not verify_valid.empty:
+                        verify_valid['Año']=verify_valid['movement_date'].dt.year
+                        verify_valid['Mes_num']=verify_valid['movement_date'].dt.month
+                        verify_valid['Mes']=verify_valid['Mes_num'].map(MONTHS)
+
+                        verify_monthly=(
+                            verify_valid.groupby(['Año','Mes_num','Mes'],as_index=False)
+                            .size()
+                            .rename(columns={'size':'Movimientos'})
+                            .sort_values(['Año','Mes_num'])
+                        )
+
+                        latest_after=verify_valid['movement_date'].max().date().isoformat()
+                        st.success(
+                            f'Importación completada: {inserted_count:,} movimientos insertados · '
+                            f'base total: {len(verify_rows):,} · última fecha: {latest_after}.'
+                        )
+
+                        st.markdown('#### Verificación después de guardar')
+                        st.dataframe(
+                            verify_monthly[['Año','Mes','Movimientos']],
+                            hide_index=True,
+                            use_container_width=True
+                        )
+
+                        aug_count=int(
+                            verify_valid.loc[
+                                (verify_valid['movement_date'].dt.year==2026) &
+                                (verify_valid['movement_date'].dt.month==8)
+                            ].shape[0]
+                        )
+
+                        if aug_count>0:
+                            st.success(f'✅ Agosto está guardado en Supabase con {aug_count:,} movimientos.')
+                        else:
+                            st.error('❌ Supabase sigue sin contener movimientos de agosto.')
+                    else:
+                        st.error('No se pudieron interpretar las fechas después de guardar.')
+                else:
+                    st.error('No se pudo verificar la tabla movements después de guardar.')
+
                 st.cache_data.clear()
-                st.rerun()
+
         except Exception as e:
             st.error(f'No se pudo completar la importación: {e}')
+
