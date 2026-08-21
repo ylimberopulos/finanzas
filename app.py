@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v24-extraordinarios-treemap-directo'
+APP_VERSION='2026.08.21-presupuesto-v25-extraordinarios-barras-y-treemap'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -667,9 +667,28 @@ elif page=='Extraordinarios':
         use_container_width=True
     )
 
+    st.markdown('### Gastos extraordinarios por mes')
+    chart=extra_view.groupby(['month_num','month'],as_index=False).amount.sum().sort_values('month_num')
+    fig=px.bar(
+        chart,
+        x='month',
+        y='amount',
+        title='Gastos extraordinarios por mes',
+        text_auto=',.0f',
+        color='month',
+        color_discrete_sequence=MONTH_COLORS,
+        labels={'month':'Mes','amount':'Importe'}
+    )
+    fig.update_yaxes(tickprefix='$',tickformat=',.0f')
+    fig.update_traces(texttemplate='$%{y:,.0f}',textposition='outside')
+    render_chart(
+        style(fig),
+        'gastos_extraordinarios_por_mes',
+        'chart_extraordinarios_barras'
+    )
+
     st.markdown('### Extraordinarios por mes y concepto')
     st.caption('Cada bloque grande corresponde a un mes; dentro aparecen los conceptos de ese mes.')
-
     render_chart(
         extraordinary_treemap(extra_view),
         'extraordinarios_por_mes_y_concepto',
