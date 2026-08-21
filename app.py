@@ -1,10 +1,10 @@
 from pathlib import Path
 from io import BytesIO
 import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, streamlit as st
-from src.importers import parse_alzex,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
+from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v14-agosto-directo-supabase'
+APP_VERSION='2026.08.21-presupuesto-v15-gastos-reales-conciliacion'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -29,6 +29,105 @@ def budget_template():
     return buffer.getvalue()
 @st.cache_data
 def extraordinary_data():return load_extraordinary(str(DATA/'gastos_no_programados.xlsx'))
+
+def _read_alzex_raw(file_bytes):
+    """Lee el CSV original de Alzex conservando Precio y Suma."""
+    from io import BytesIO
+    last_error=None
+    for enc in ('cp1252','latin1','utf-8-sig'):
+        try:
+            raw=pd.read_csv(BytesIO(file_bytes),sep=';',encoding=enc)
+            if {'Descripción','Fecha','Precio','Suma'}.issubset(raw.columns):
+                return raw
+        except Exception as e:
+            last_error=e
+    raise ValueError(f'No se pudo leer el CSV original de Alzex: {last_error}')
+
+def parse_alzex(file_bytes,file_name):
+    """Parser local: conserva únicamente egresos (Suma < 0) y usa abs(Suma) como gasto."""
+    parsed=_parse_alzex_base(file_bytes,file_name).copy()
+    raw=_read_alzex_raw(file_bytes).copy()
+
+    raw['movement_date']=pd.to_datetime(raw['Fecha'],format='%d/%m/%y',errors='coerce')
+    raw['Precio']=pd.to_numeric(raw['Precio'],errors='coerce')
+    raw['Suma']=pd.to_numeric(raw['Suma'],errors='coerce')
+    raw['description_key']=raw['Descripción'].fillna('').astype(str).str.strip()
+    raw['date_key']=raw['movement_date'].dt.strftime('%Y-%m-%d')
+    raw['price_key']=raw['Precio'].abs().round(2)
+    raw['_occ']=raw.groupby(['description_key','date_key','price_key'],dropna=False).cumcount()
+
+    parsed['movement_date']=pd.to_datetime(parsed['movement_date'],errors='coerce')
+    parsed['description_key']=parsed['description'].fillna('').astype(str).str.strip()
+    parsed['date_key']=parsed['movement_date'].dt.strftime('%Y-%m-%d')
+    parsed['price_key']=pd.to_numeric(parsed['amount'],errors='coerce').abs().round(2)
+    parsed['_occ']=parsed.groupby(['description_key','date_key','price_key'],dropna=False).cumcount()
+
+    signed=raw[['description_key','date_key','price_key','_occ','Suma','Cuenta']].copy()
+    merged=parsed.merge(
+        signed,
+        on=['description_key','date_key','price_key','_occ'],
+        how='left'
+    )
+
+    merged=merged[merged['Suma'].notna() & (merged['Suma']<0)].copy()
+    merged['amount']=merged['Suma'].abs().astype(float)
+
+    drop_cols=['description_key','date_key','price_key','_occ','Suma','Cuenta']
+    return merged.drop(columns=[c for c in drop_cols if c in merged.columns])
+
+def alzex_reconciliation(file_bytes):
+    """Resumen mensual Precio vs Suma para detectar ingresos y diferencias."""
+    raw=_read_alzex_raw(file_bytes).copy()
+    raw['Fecha_dt']=pd.to_datetime(raw['Fecha'],format='%d/%m/%y',errors='coerce')
+    raw['Precio']=pd.to_numeric(raw['Precio'],errors='coerce').fillna(0)
+    raw['Suma']=pd.to_numeric(raw['Suma'],errors='coerce').fillna(0)
+    raw=raw.dropna(subset=['Fecha_dt'])
+    raw['Año']=raw['Fecha_dt'].dt.year
+    raw['Mes_num']=raw['Fecha_dt'].dt.month
+    raw['Mes']=raw['Mes_num'].map(MONTHS)
+    raw['Egreso']=raw['Suma'].where(raw['Suma']<0,0).abs()
+    raw['Ingreso']=raw['Suma'].where(raw['Suma']>0,0)
+    raw['Cuenta']=raw['Cuenta'].fillna('Sin cuenta').astype(str)
+
+    monthly=(
+        raw.groupby(['Año','Mes_num','Mes'],as_index=False)
+        .agg(
+            Filas=('Suma','size'),
+            Precio_total=('Precio','sum'),
+            Egresos=('Egreso','sum'),
+            Ingresos=('Ingreso','sum')
+        )
+        .sort_values(['Año','Mes_num'])
+    )
+    monthly['Neto']=monthly['Ingresos']-monthly['Egresos']
+
+    accounts=(
+        raw.groupby(['Año','Mes_num','Mes','Cuenta'],as_index=False)
+        .agg(Egresos=('Egreso','sum'),Ingresos=('Ingreso','sum'))
+        .sort_values(['Año','Mes_num','Cuenta'])
+    )
+    return monthly,accounts
+
+def replace_movements_with_csv_expenses(file_bytes,file_name):
+    """Reemplaza en Supabase el rango de fechas del CSV por egresos reales del mismo archivo."""
+    parsed=parse_alzex(file_bytes,file_name).copy()
+    if parsed.empty:
+        raise ValueError('El CSV no contiene egresos válidos.')
+
+    dates=pd.to_datetime(parsed['movement_date'],errors='coerce').dropna()
+    if dates.empty:
+        raise ValueError('No se pudieron interpretar las fechas del CSV.')
+
+    start_date=dates.min().date().isoformat()
+    end_date=dates.max().date().isoformat()
+
+    db=client()
+    db.table('movements').delete().gte('movement_date',start_date).lte('movement_date',end_date).execute()
+
+    clean_rows=clean_records_for_json(parsed)
+    inserted=insert_rows_batched('movements',clean_rows,batch_size=400)
+    return inserted,start_date,end_date
+
 def initial_movements():
     p=DATA/'alzex_julio_2026.csv';return parse_alzex(p.read_bytes(),p.name)
 def compiled_data():return load_compiled_monthly(str(DATA/'2026_ene_jul.xlsx'))
@@ -621,137 +720,67 @@ elif page=='Inversiones':
             except Exception as e:st.error(str(e))
 else:
     st.title('Importar movimientos de Alzex')
-    st.write('Carga un CSV completo o mensual. La huella de cada movimiento evita duplicados.')
-
-    # 1) Qué hay HOY en Supabase, por mes.
-    db_rows=fetch_all_rows('movements')
-    db_df=pd.DataFrame(db_rows) if db_rows else pd.DataFrame()
-
-    if not db_df.empty and 'movement_date' in db_df.columns:
-        db_df['movement_date']=pd.to_datetime(db_df['movement_date'],errors='coerce')
-        db_valid=db_df.dropna(subset=['movement_date']).copy()
-
-        if not db_valid.empty:
-            db_valid['Año']=db_valid['movement_date'].dt.year
-            db_valid['Mes_num']=db_valid['movement_date'].dt.month
-            db_valid['Mes']=db_valid['Mes_num'].map(MONTHS)
-
-            db_monthly=(
-                db_valid.groupby(['Año','Mes_num','Mes'],as_index=False)
-                .size()
-                .rename(columns={'size':'Movimientos'})
-                .sort_values(['Año','Mes_num'])
-            )
-
-            latest_date=db_valid['movement_date'].max().date().isoformat()
-            st.info(f"Supabase: {len(db_df):,} movimientos · última fecha guardada: {latest_date}")
-
-            st.markdown('#### Movimientos guardados en Supabase por mes')
-            st.table(db_monthly[['Año','Mes','Movimientos']].set_index('Año'))
-        else:
-            st.warning('Hay registros en Supabase, pero sus fechas no se pudieron interpretar.')
-    else:
-        st.warning('Supabase no tiene movimientos guardados todavía.')
+    st.write('La app toma como gasto únicamente los movimientos con Suma negativa. Los ingresos ya no se contabilizan como gasto.')
 
     uploaded=st.file_uploader('Archivo CSV',type=['csv'])
 
     if uploaded:
         try:
-            parsed=parse_alzex(uploaded.getvalue(),uploaded.name)
-
-            # 2) Qué detecta parse_alzex en el CSV, por mes.
-            parsed_diag=parsed.copy()
-            parsed_diag['movement_date']=pd.to_datetime(parsed_diag['movement_date'],errors='coerce')
-            parsed_diag=parsed_diag.dropna(subset=['movement_date'])
-            parsed_diag['Año']=parsed_diag['movement_date'].dt.year
-            parsed_diag['Mes_num']=parsed_diag['movement_date'].dt.month
-            parsed_diag['Mes']=parsed_diag['Mes_num'].map(MONTHS)
-
-            parsed_monthly=(
-                parsed_diag.groupby(['Año','Mes_num','Mes'],as_index=False)
-                .size()
-                .rename(columns={'size':'Movimientos'})
-                .sort_values(['Año','Mes_num'])
-            )
+            file_bytes=uploaded.getvalue()
+            parsed=parse_alzex(file_bytes,uploaded.name)
+            monthly_rec,account_rec=alzex_reconciliation(file_bytes)
 
             existing={r['fingerprint'] for r in fetch_all_rows('movements') if r.get('fingerprint')}
             new=parsed[~parsed.fingerprint.isin(existing)].copy()
 
             c1,c2,c3=st.columns(3)
-            c1.metric('Movimientos válidos',f'{len(parsed):,}')
-            c2.metric('Nuevos',f'{len(new):,}')
-            c3.metric('Duplicados',f'{len(parsed)-len(new):,}')
+            c1.metric('Egresos válidos',f'{len(parsed):,}')
+            c2.metric('Egresos nuevos',f'{len(new):,}')
+            c3.metric('Ya existentes',f'{len(parsed)-len(new):,}')
 
-            st.markdown('#### Movimientos detectados en el CSV por mes')
-            st.table(parsed_monthly[['Año','Mes','Movimientos']].set_index('Año'))
+            st.markdown('### Conciliación del CSV')
+            st.caption('Precio es el importe capturado en Alzex; Egresos usa únicamente Suma < 0; Ingresos usa Suma > 0.')
+            rec_show=monthly_rec[['Año','Mes','Filas','Precio_total','Egresos','Ingresos','Neto']].copy()
+            for col in ['Precio_total','Egresos','Ingresos','Neto']:
+                rec_show[col]=rec_show[col].map(money)
+            st.table(rec_show.set_index('Año'))
 
-            if not parsed_diag.empty:
-                st.caption(
-                    f"CSV procesado desde {parsed_diag['movement_date'].min().date().isoformat()} "
-                    f"hasta {parsed_diag['movement_date'].max().date().isoformat()}."
+            with st.expander('Ver conciliación por cuenta'):
+                account_show=account_rec[['Año','Mes','Cuenta','Egresos','Ingresos']].copy()
+                account_show['Egresos']=account_show['Egresos'].map(money)
+                account_show['Ingresos']=account_show['Ingresos'].map(money)
+                st.table(account_show.set_index('Año'))
+
+            st.markdown('### Vista previa de egresos')
+            st.dataframe(parsed.head(50),use_container_width=True,hide_index=True)
+
+            st.warning(
+                'Para corregir enero y evitar que los ingresos históricos sigan apareciendo como gasto, '
+                'hay que reconciliar la base con este CSV. La operación reemplaza únicamente los movimientos '
+                'dentro del rango de fechas cubierto por el archivo.'
+            )
+
+            confirm_reconcile=st.checkbox(
+                'Confirmo que este CSV es el archivo completo del periodo y quiero usarlo como fuente de verdad.'
+            )
+
+            if st.button('Reconciliar base con este CSV',type='primary',disabled=not confirm_reconcile):
+                inserted,start_date,end_date=replace_movements_with_csv_expenses(
+                    file_bytes,uploaded.name
                 )
-
-            st.markdown('#### Vista previa de movimientos nuevos')
-            st.dataframe(new.head(50),use_container_width=True,hide_index=True)
-
-            if st.button('Confirmar importación',type='primary',disabled=new.empty):
-                clean_rows=clean_records_for_json(new)
-                inserted_count=insert_rows_batched('movements',clean_rows,batch_size=400)
-
                 insert_one('imports',{
                     'file_name':uploaded.name,
                     'row_count':int(len(parsed)),
-                    'new_rows':int(len(new)),
-                    'duplicate_rows':int(len(parsed)-len(new))
+                    'new_rows':int(inserted),
+                    'duplicate_rows':0
                 })
-
-                # 3) Verificación DESPUÉS de guardar, por mes.
-                verify_rows=fetch_all_rows('movements')
-                verify_df=pd.DataFrame(verify_rows) if verify_rows else pd.DataFrame()
-
-                if not verify_df.empty and 'movement_date' in verify_df.columns:
-                    verify_df['movement_date']=pd.to_datetime(verify_df['movement_date'],errors='coerce')
-                    verify_valid=verify_df.dropna(subset=['movement_date']).copy()
-
-                    if not verify_valid.empty:
-                        verify_valid['Año']=verify_valid['movement_date'].dt.year
-                        verify_valid['Mes_num']=verify_valid['movement_date'].dt.month
-                        verify_valid['Mes']=verify_valid['Mes_num'].map(MONTHS)
-
-                        verify_monthly=(
-                            verify_valid.groupby(['Año','Mes_num','Mes'],as_index=False)
-                            .size()
-                            .rename(columns={'size':'Movimientos'})
-                            .sort_values(['Año','Mes_num'])
-                        )
-
-                        latest_after=verify_valid['movement_date'].max().date().isoformat()
-                        st.success(
-                            f'Importación completada: {inserted_count:,} movimientos insertados · '
-                            f'base total: {len(verify_rows):,} · última fecha: {latest_after}.'
-                        )
-
-                        st.markdown('#### Verificación después de guardar')
-                        st.table(verify_monthly[['Año','Mes','Movimientos']].set_index('Año'))
-
-                        aug_count=int(
-                            verify_valid.loc[
-                                (verify_valid['movement_date'].dt.year==2026) &
-                                (verify_valid['movement_date'].dt.month==8)
-                            ].shape[0]
-                        )
-
-                        if aug_count>0:
-                            st.success(f'✅ Agosto está guardado en Supabase con {aug_count:,} movimientos.')
-                        else:
-                            st.error('❌ Supabase sigue sin contener movimientos de agosto.')
-                    else:
-                        st.error('No se pudieron interpretar las fechas después de guardar.')
-                else:
-                    st.error('No se pudo verificar la tabla movements después de guardar.')
-
                 st.cache_data.clear()
+                st.success(
+                    f'Base reconciliada: {inserted:,} egresos guardados del {start_date} al {end_date}. '
+                    'Los ingresos ya no forman parte del gasto.'
+                )
+                st.rerun()
 
         except Exception as e:
-            st.error(f'No se pudo completar la importación: {e}')
+            st.error(f'No se pudo completar la conciliación: {e}')
 
