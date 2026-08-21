@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v16-conciliado-alzex'
+APP_VERSION='2026.08.21-presupuesto-v17-detalle-subcategorias'
 ALZEX_MONTHLY_TOTAL_OVERRIDES={
     (2026,7):134991.53,
     (2026,8):69128.50,
@@ -318,6 +318,64 @@ def vertical_composition(view,y_step=None):
 
 def all_categories_chart(view):
     data=view.groupby('category',as_index=False).amount.sum().sort_values('amount');fig=px.bar(data,x='amount',y='category',orientation='h',title='Gasto total por todas las categorías',text=[money(v) for v in data.amount],color='amount',color_continuous_scale=['#BFDBFE','#2563EB'],labels={'amount':'Gasto','category':'Categoría'});fig.update_xaxes(tickprefix='$',tickformat=',.0f');fig.update_traces(textposition='outside');fig.update_layout(coloraxis_showscale=False,margin=dict(l=10,r=90,t=52,b=10),height=max(450,36*len(data)));return style(fig)
+
+def subcategory_stacked_chart(view,top_categories=10,top_subcategories=12):
+    data=view.copy()
+    if data.empty:
+        return go.Figure()
+    data['category']=data['category'].fillna('Sin clasificar')
+    data['subcategory']=data['subcategory'].fillna('Sin detalle')
+    cat_order=data.groupby('category').amount.sum().sort_values(ascending=False)
+    keep_categories=list(cat_order.head(top_categories).index)
+    data=data[data['category'].isin(keep_categories)].copy()
+
+    sub_order=data.groupby('subcategory').amount.sum().sort_values(ascending=False)
+    keep_subcategories=set(sub_order.head(top_subcategories).index)
+    data['subcategory_plot']=data['subcategory'].where(data['subcategory'].isin(keep_subcategories),'Otras subcategorías')
+
+    chart=(
+        data.groupby(['category','subcategory_plot'],as_index=False)
+        .amount.sum()
+    )
+    category_order=list(chart.groupby('category').amount.sum().sort_values(ascending=True).index)
+    fig=px.bar(
+        chart,
+        x='amount',
+        y='category',
+        color='subcategory_plot',
+        orientation='h',
+        barmode='stack',
+        title='Detalle por categoría y subcategoría',
+        labels={'amount':'Gasto','category':'Categoría','subcategory_plot':'Subcategoría'},
+        category_orders={'category':category_order}
+    )
+    fig.update_xaxes(tickprefix='$',tickformat=',.0f')
+    totals=chart.groupby('category',as_index=False).amount.sum()
+    fig.add_scatter(x=totals.amount,y=totals.category,mode='text',text=[money(v) for v in totals.amount],textposition='middle right',showlegend=False,hoverinfo='skip')
+    fig.update_layout(margin=dict(l=10,r=95,t=52,b=10),height=max(420,42*len(category_order)))
+    return style(fig)
+
+def subcategory_treemap(view,top_categories=12):
+    data=view.copy()
+    if data.empty:
+        return go.Figure()
+    data['category']=data['category'].fillna('Sin clasificar')
+    data['subcategory']=data['subcategory'].fillna('Sin detalle')
+    keep_categories=list(data.groupby('category').amount.sum().sort_values(ascending=False).head(top_categories).index)
+    data=data[data['category'].isin(keep_categories)].copy()
+    chart=data.groupby(['category','subcategory'],as_index=False).amount.sum()
+    fig=px.treemap(
+        chart,
+        path=['category','subcategory'],
+        values='amount',
+        title='Mapa de gasto por categoría y subcategoría'
+    )
+    fig.update_traces(
+        texttemplate='%{label}<br>$%{value:,.0f}',
+        hovertemplate='<b>%{label}</b><br>$%{value:,.2f}<extra></extra>'
+    )
+    fig.update_layout(margin=dict(l=10,r=10,t=52,b=10))
+    return fig
 authenticate()
 with st.sidebar:
     st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
@@ -360,6 +418,27 @@ if page=='Resumen':
         trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);fig=px.bar(trend,x='month_name',y='amount',title='Gasto mensual',text_auto=',.0f',color='month_name',color_discrete_sequence=MONTH_COLORS,labels={'month_name':'Mes','amount':'Gasto'});fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text=f'Presupuesto {money(monthly_budget)}');fig.update_yaxes(tickprefix='$',tickformat=',.0f');fig.update_layout(showlegend=False);st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG)
     with right:
         st.plotly_chart(horizontal_month_chart(view,'Principales categorías por mes'),use_container_width=True,config=PLOT_CONFIG)
+
+    st.markdown('### Detalle por categoría y subcategoría')
+    st.caption('Te dejo dos vistas: una apilada para comparar composición y una alternativa tipo mapa para detectar de inmediato dónde se concentra el gasto.')
+
+    dc1,dc2=st.columns([1,1])
+    top_categories_detail=dc1.slider('Categorías a mostrar',min_value=5,max_value=15,value=10,key='top_categories_detail_sum')
+    top_subcategories_detail=dc2.slider('Subcategorías a destacar',min_value=5,max_value=20,value=12,key='top_subcategories_detail_sum')
+
+    tab1,tab2=st.tabs(['Gráfica apilada','Mapa de gasto'])
+    with tab1:
+        st.plotly_chart(
+            subcategory_stacked_chart(view,top_categories_detail,top_subcategories_detail),
+            use_container_width=True,
+            config=PLOT_CONFIG
+        )
+    with tab2:
+        st.plotly_chart(
+            subcategory_treemap(view,top_categories_detail),
+            use_container_width=True,
+            config=PLOT_CONFIG
+        )
 elif page=='Tendencias y fugas':
     st.title('Tendencias y fugas');st.caption('Evolución, concentración y categorías que más presionan el gasto');view,selected,label,year=period_filter(monthly,'trend');st.markdown('#### '+label);axis_choice=st.selectbox('Detalle del eje Y',['Automático','$5,000','$1,000'],key='axis_detail');y_step={'Automático':None,'$5,000':5000,'$1,000':1000}[axis_choice];st.caption('También puedes acercar una zona arrastrando sobre la gráfica y descargarla con el icono de cámara.');trend=view.groupby('month',as_index=False).amount.sum().set_index('month').reindex(selected,fill_value=0).rename_axis('month').reset_index();trend['month_name']=trend.month.map(MONTHS);trend['media']=trend.amount.rolling(3,min_periods=1).mean();fig=go.Figure();fig.add_bar(x=trend.month_name,y=trend.amount,name='Gasto mensual',marker_color=[MONTH_COLORS[m-1] for m in trend.month],text=[money(x) for x in trend.amount],textposition='outside');fig.add_scatter(x=trend.month_name,y=trend.media,name='Promedio móvil 3 meses',line=dict(color=NAVY,width=3),mode='lines+markers');fig.add_hline(y=monthly_budget,line_dash='dash',line_color=GOLD,annotation_text='Presupuesto mensual');fig.update_yaxes(tickprefix='$',tickformat=',.0f',dtick=y_step);fig.update_layout(title='Gasto y tendencia mensual');st.plotly_chart(style(fig),use_container_width=True,config=PLOT_CONFIG);st.plotly_chart(vertical_composition(view,y_step),use_container_width=True,config=PLOT_CONFIG);current=view.groupby('category',as_index=False).amount.sum().sort_values('amount',ascending=False);current['share']=current.amount/current.amount.sum();current.columns=['Categoría','Gasto','Participación'];current['Gasto']=current.Gasto.map(money);current['Participación']=current.Participación.map(lambda x:f'{x:.1%}');st.subheader('Concentración del gasto');st.dataframe(current,hide_index=True,use_container_width=True,column_config={'Categoría':st.column_config.TextColumn(width='large'),'Gasto':st.column_config.TextColumn(width='medium'),'Participación':st.column_config.TextColumn(width='small')});st.plotly_chart(all_categories_chart(view),use_container_width=True,config=PLOT_CONFIG)
 elif page=='Presupuesto':
