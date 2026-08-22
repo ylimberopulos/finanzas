@@ -4,7 +4,7 @@ import hmac, pandas as pd, plotly.express as px, plotly.graph_objects as go, str
 from src.importers import parse_alzex as _parse_alzex_base,load_budget,load_simple_budget,load_extraordinary,load_compiled_monthly
 from src.storage import client,fetch,insert_one,insert_rows
 ROOT=Path(__file__).parent;DATA=ROOT/'data'/'initial';MONTHS={1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',11:'Noviembre',12:'Diciembre'};MONTH_NUM={v:k for k,v in MONTHS.items()};NAVY='#172A46';BLUE='#2563EB';SKY='#60A5FA';GOLD='#D59A33';RED='#DC2626';GREEN='#16A34A';GRID='#E5EAF1';MONTH_COLORS=['#2563EB','#F59E0B','#10B981','#8B5CF6','#EF4444','#06B6D4','#F97316','#6366F1','#84CC16','#EC4899','#14B8A6','#64748B']
-APP_VERSION='2026.08.21-presupuesto-v34-subcategorias-ranking-numerado'
+APP_VERSION='2026.08.21-presupuesto-v35-informe-oscuro'
 st.set_page_config(page_title='Presupuesto Familiar',page_icon='💰',layout='wide')
 PLOT_CONFIG={'displaylogo':False,'responsive':True,'scrollZoom':True,'displayModeBar':True,'toImageButtonOptions':{'format':'png','filename':'presupuesto-familiar','scale':2}}
 st.markdown("""<style>.stApp{background:#F7F9FC}.block-container{padding-top:2rem;max-width:1500px}h1,h2,h3{color:#172A46!important}.stMetric{background:white;border:1px solid #E5EAF1;border-radius:14px;padding:16px;box-shadow:0 2px 8px #172A4610}[data-testid='stSidebar']{background:#172A46}[data-testid='stSidebar'] *{color:#F8FAFC!important}.stDataFrame{border:1px solid #E5EAF1;border-radius:12px;overflow:hidden}</style>""",unsafe_allow_html=True)
@@ -604,7 +604,7 @@ def subcategory_ranking_chart(view,top_n=20):
 
 authenticate()
 with st.sidebar:
-    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Tendencias y fugas','Presupuesto','Apartados mensuales','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
+    st.markdown('## 💰 Presupuesto');page=st.radio('Navegación',['Resumen','Informe','Tendencias y fugas','Presupuesto','Apartados mensuales','Extraordinarios','Inversiones','Importar Alzex'],label_visibility='collapsed');st.divider()
     with st.expander('Cargar presupuesto mensual'):
         st.download_button('Descargar plantilla Excel',budget_template(),file_name='plantilla_presupuesto_mensual.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',use_container_width=True)
         upload_key=st.session_state.get('budget_upload_key',0);budget_file=st.file_uploader('Excel con Categoría y Monto',type=['xlsx'],key=f'budget_file_{upload_key}')
@@ -737,6 +737,347 @@ if page=='Resumen':
                 'chart_detalle_treemap'
             )
 
+
+
+
+elif page=='Informe':
+    # Vista ejecutiva independiente. No modifica el contenido ni los controles de "Resumen".
+    st.markdown("""
+    <style>
+    .stApp{background:#07111F}
+    .block-container{padding-top:1.4rem;max-width:1600px}
+    h1,h2,h3,h4{color:#F8FAFC!important}
+    p, label, .stCaption, [data-testid="stMarkdownContainer"]{color:#CBD5E1}
+    [data-testid="stMetric"]{
+        background:linear-gradient(180deg,#121E32 0%,#0D1728 100%);
+        border:1px solid #24324A;border-radius:14px;padding:14px 16px;
+        box-shadow:0 8px 24px rgba(0,0,0,.18)
+    }
+    [data-testid="stMetricLabel"]{color:#AAB7CA!important}
+    [data-testid="stMetricValue"]{color:#F8FAFC!important}
+    [data-testid="stSelectbox"]>div>div,
+    [data-testid="stMultiSelect"]>div>div{
+        background:#0D1728!important;color:#E2E8F0!important;border-color:#24324A!important
+    }
+    .report-card{
+        background:linear-gradient(180deg,#121E32 0%,#0D1728 100%);
+        border:1px solid #24324A;border-radius:16px;padding:18px 20px;
+        box-shadow:0 10px 28px rgba(0,0,0,.18);height:100%;
+    }
+    .report-kicker{font-size:.78rem;color:#8FA1B8;margin-bottom:8px}
+    .report-value{font-size:1.72rem;font-weight:750;color:#F8FAFC;line-height:1.05}
+    .report-sub{font-size:.78rem;color:#8FA1B8;margin-top:8px}
+    .report-good{color:#35D07F;font-weight:700}
+    .report-bad{color:#FF6B6B;font-weight:700}
+    .report-neutral{color:#7DD3FC;font-weight:700}
+    .report-panel{
+        background:#0D1728;border:1px solid #24324A;border-radius:16px;
+        padding:10px 14px 4px 14px;margin-bottom:12px
+    }
+    .insight{
+        background:#101C30;border:1px solid #24324A;border-radius:14px;
+        padding:14px 15px;color:#D8E2F0;min-height:92px
+    }
+    .insight b{color:#F8FAFC}
+    </style>
+    """,unsafe_allow_html=True)
+
+    st.title('Informe')
+    st.caption('Vista ejecutiva del gasto · análisis independiente del Resumen')
+
+    # Filtros propios de Informe
+    report_years=sorted(monthly.year.dropna().astype(int).unique(),reverse=True)
+    f1,f2,f3=st.columns([1,2.2,2.2])
+    report_year=f1.selectbox('Año',report_years,key='report_year')
+    report_available=sorted(monthly.loc[monthly.year==report_year,'month'].dropna().astype(int).unique())
+    report_month_names=[MONTHS[m] for m in report_available]
+    report_chosen_names=f2.multiselect(
+        'Meses',
+        report_month_names,
+        default=report_month_names,
+        key='report_months'
+    )
+    report_months=[MONTH_NUM[m] for m in report_chosen_names]
+    report_categories=sorted(
+        monthly.loc[
+            (monthly.year==report_year) & (monthly.month.isin(report_months)),
+            'category'
+        ].dropna().unique()
+    ) if report_months else []
+    report_chosen_cats=f3.multiselect(
+        'Categorías',
+        report_categories,
+        key='report_categories',
+        placeholder='Todas las categorías'
+    )
+
+    if not report_months:
+        st.info('Selecciona al menos un mes.')
+        st.stop()
+
+    report_view=monthly[
+        (monthly.year==report_year) &
+        (monthly.month.isin(report_months))
+    ].copy()
+    if report_chosen_cats:
+        report_view=report_view[report_view.category.isin(report_chosen_cats)].copy()
+
+    report_spent=float(report_view.amount.sum())
+    report_target=monthly_budget*len(report_months)
+    report_delta=report_spent-report_target
+    report_avg=report_spent/max(1,len(report_months))
+    report_vs=(report_avg/monthly_budget-1) if monthly_budget else 0.0
+
+    report_cat=(
+        report_view.groupby('category',as_index=False).amount.sum()
+        .sort_values('amount',ascending=False)
+    )
+    principal_cat=str(report_cat.iloc[0]['category']) if not report_cat.empty else '—'
+    principal_val=float(report_cat.iloc[0]['amount']) if not report_cat.empty else 0.0
+    principal_share=(principal_val/report_spent) if report_spent else 0.0
+
+    # KPIs
+    k1,k2,k3,k4,k5=st.columns(5)
+    k1.markdown(
+        f"<div class='report-card'><div class='report-kicker'>Gasto acumulado</div>"
+        f"<div class='report-value'>{money(report_spent)}</div>"
+        f"<div class='report-sub'>{report_chosen_names[0] if report_chosen_names else ''} – {report_chosen_names[-1] if report_chosen_names else ''} {report_year}</div></div>",
+        unsafe_allow_html=True
+    )
+    k2.markdown(
+        f"<div class='report-card'><div class='report-kicker'>Promedio mensual</div>"
+        f"<div class='report-value'>{money(report_avg)}</div>"
+        f"<div class='report-sub'>{len(report_months)} meses analizados</div></div>",
+        unsafe_allow_html=True
+    )
+    k3.markdown(
+        f"<div class='report-card'><div class='report-kicker'>Presupuesto mensual</div>"
+        f"<div class='report-value'>{money(monthly_budget)}</div>"
+        f"<div class='report-sub'>Meta mensual establecida</div></div>",
+        unsafe_allow_html=True
+    )
+    vs_class='report-good' if report_vs<=0 else 'report-bad'
+    vs_sign='+' if report_vs>0 else ''
+    k4.markdown(
+        f"<div class='report-card'><div class='report-kicker'>Vs presupuesto (promedio)</div>"
+        f"<div class='report-value'>{vs_sign}{report_vs:.1%}</div>"
+        f"<div class='report-sub {vs_class}'>{money(report_avg-monthly_budget)}</div></div>",
+        unsafe_allow_html=True
+    )
+    k5.markdown(
+        f"<div class='report-card'><div class='report-kicker'>Principal categoría</div>"
+        f"<div class='report-value'>{principal_cat}</div>"
+        f"<div class='report-sub'>{principal_share:.1%} del gasto seleccionado</div></div>",
+        unsafe_allow_html=True
+    )
+
+    def report_style(fig,height=None):
+        fig.update_layout(
+            font=dict(color='#D8E2F0'),
+            paper_bgcolor='#0D1728',
+            plot_bgcolor='#0D1728',
+            margin=dict(l=12,r=12,t=58,b=16),
+            legend_title_text='',
+            hoverlabel=dict(bgcolor='#111827',font_color='#F8FAFC'),
+        )
+        if height:
+            fig.update_layout(height=height)
+        fig.update_xaxes(gridcolor='#223049',zerolinecolor='#223049')
+        fig.update_yaxes(gridcolor='#223049',zerolinecolor='#223049')
+        return fig
+
+    # Tendencia + categorías
+    left,right=st.columns([1.45,1])
+    with left:
+        st.markdown("<div class='report-panel'>",unsafe_allow_html=True)
+        rtrend=(
+            report_view.groupby('month',as_index=False).amount.sum()
+            .set_index('month').reindex(report_months,fill_value=0)
+            .rename_axis('month').reset_index()
+        )
+        rtrend['month_name']=rtrend.month.map(MONTHS)
+        rtrend['media']=rtrend.amount.rolling(3,min_periods=1).mean()
+        fig=go.Figure()
+        fig.add_bar(
+            x=rtrend.month_name,y=rtrend.amount,name='Gasto mensual',
+            marker_color=[MONTH_COLORS[(int(m)-1)%len(MONTH_COLORS)] for m in rtrend.month],
+            text=[money(x) for x in rtrend.amount],textposition='outside'
+        )
+        fig.add_scatter(
+            x=rtrend.month_name,y=rtrend.media,
+            name='Promedio móvil 3 meses',mode='lines+markers',
+            line=dict(color='#E6EDF7',width=2.5),marker=dict(size=6)
+        )
+        fig.add_hline(
+            y=monthly_budget,line_dash='dash',line_color='#F59E0B',
+            annotation_text='Presupuesto mensual',annotation_font_color='#F8C76A'
+        )
+        fig.update_layout(title='Gasto y tendencia mensual')
+        fig.update_yaxes(tickprefix='$',tickformat=',.0f')
+        st.plotly_chart(report_style(fig,390),use_container_width=True,config=PLOT_CONFIG,key='report_trend')
+        st.markdown("</div>",unsafe_allow_html=True)
+
+    with right:
+        st.markdown("<div class='report-panel'>",unsafe_allow_html=True)
+        cat_plot=report_cat.sort_values('amount',ascending=True).copy()
+        fig=go.Figure(go.Bar(
+            x=cat_plot['amount'],y=cat_plot['category'],orientation='h',
+            marker=dict(color='#7C5CFC'),
+            text=[f"{money(v)} ({(v/report_spent if report_spent else 0):.1%})" for v in cat_plot['amount']],
+            textposition='outside',
+            hovertemplate='<b>%{y}</b><br>$%{x:,.2f}<extra></extra>'
+        ))
+        fig.update_layout(title='Gasto total por categoría')
+        fig.update_xaxes(tickprefix='$',tickformat=',.0f')
+        st.plotly_chart(report_style(fig,390),use_container_width=True,config=PLOT_CONFIG,key='report_categories_chart')
+        st.markdown("</div>",unsafe_allow_html=True)
+
+    # Heatmap + Pareto
+    lower_left,lower_right=st.columns([1,1.15])
+    with lower_left:
+        st.markdown("<div class='report-panel'>",unsafe_allow_html=True)
+        heat=(
+            report_view.groupby(['category','month'],as_index=False).amount.sum()
+        )
+        month_totals=heat.groupby('month')['amount'].sum().to_dict()
+        heat['pct']=heat.apply(
+            lambda r:(r['amount']/month_totals.get(r['month'],0)) if month_totals.get(r['month'],0) else 0,
+            axis=1
+        )
+        heat_categories=list(
+            heat.groupby('category').amount.sum().sort_values(ascending=False).index
+        )
+        z=[]
+        hover=[]
+        for cat in heat_categories:
+            row=[]
+            hrow=[]
+            for m in report_months:
+                matched=heat[(heat.category==cat)&(heat.month==m)]
+                pct=float(matched.iloc[0]['pct']) if not matched.empty else 0.0
+                amt=float(matched.iloc[0]['amount']) if not matched.empty else 0.0
+                row.append(pct)
+                hrow.append(f"{cat}<br>{MONTHS[m]}<br>{money(amt)} · {pct:.1%}")
+            z.append(row)
+            hover.append(hrow)
+
+        heat_fig=go.Figure(go.Heatmap(
+            z=z,x=[MONTHS[m][:3] for m in report_months],y=heat_categories,
+            colorscale=[
+                [0.0,'#142239'],[0.25,'#27415F'],[0.5,'#7E7A3A'],
+                [0.75,'#C36A2C'],[1.0,'#E54B4B']
+            ],
+            text=[[f'{v:.0%}' for v in row] for row in z],
+            texttemplate='%{text}',
+            customdata=hover,
+            hovertemplate='%{customdata}<extra></extra>',
+            showscale=False
+        ))
+        heat_fig.update_layout(title='Composición del gasto por mes (% del total)')
+        st.plotly_chart(report_style(heat_fig,430),use_container_width=True,config=PLOT_CONFIG,key='report_heatmap')
+        st.markdown("</div>",unsafe_allow_html=True)
+
+    with lower_right:
+        st.markdown("<div class='report-panel'>",unsafe_allow_html=True)
+        all_subcats=int(report_view['subcategory'].fillna('Sin detalle').nunique()) if not report_view.empty else 0
+        top_choices=[n for n in [10,15,20,25,50] if n<=max(1,all_subcats)]
+        if all_subcats and all_subcats not in top_choices:
+            top_choices.append(all_subcats)
+        top_default=15 if 15 in top_choices else (top_choices[0] if top_choices else 1)
+        top_n=st.selectbox(
+            'Top N',
+            top_choices or [1],
+            index=(top_choices.index(top_default) if top_choices else 0),
+            key='report_top_n'
+        )
+
+        pareto=report_view.copy()
+        pareto['subcategory']=pareto['subcategory'].fillna('Sin detalle')
+        pareto=(
+            pareto.groupby('subcategory',as_index=False).amount.sum()
+            .sort_values('amount',ascending=False).head(top_n).reset_index(drop=True)
+        )
+        pareto['rank']=pareto.index+1
+        pareto['cum_pct']=pareto['amount'].cumsum()/report_spent if report_spent else 0
+        pareto['label']=pareto.apply(lambda r:f"{int(r['rank'])}. {r['subcategory']}",axis=1)
+
+        pfig=go.Figure()
+        pfig.add_bar(
+            x=pareto['amount'],y=pareto['label'],orientation='h',
+            name='Gasto acumulado',marker_color='#2F80ED',
+            text=[money(v) for v in pareto['amount']],textposition='outside'
+        )
+        pfig.add_scatter(
+            x=pareto['cum_pct'],y=pareto['label'],mode='lines+markers',
+            name='% acumulado',xaxis='x2',
+            line=dict(color='#E6EDF7',width=2),marker=dict(size=5)
+        )
+        pfig.update_layout(
+            title=f'Top subcategorías · Top {len(pareto)} + Pareto',
+            xaxis=dict(title='Gasto',tickprefix='$',tickformat=',.0f',gridcolor='#223049'),
+            xaxis2=dict(
+                title='% acumulado',overlaying='x',side='top',
+                tickformat='.0%',range=[0,1.02],gridcolor='#223049'
+            ),
+            yaxis=dict(categoryorder='array',categoryarray=list(reversed(pareto['label'])))
+        )
+        st.plotly_chart(report_style(pfig,430),use_container_width=True,config=PLOT_CONFIG,key='report_pareto')
+        st.markdown("</div>",unsafe_allow_html=True)
+
+    # Hallazgos automáticos
+    st.markdown('### Alertas y hallazgos')
+    month_totals_report=(
+        report_view.groupby('month',as_index=False).amount.sum()
+        .sort_values('amount',ascending=False)
+    )
+    highest_month_name=MONTHS[int(month_totals_report.iloc[0]['month'])] if not month_totals_report.empty else '—'
+    highest_month_value=float(month_totals_report.iloc[0]['amount']) if not month_totals_report.empty else 0.0
+    highest_month_vs=(highest_month_value/monthly_budget-1) if monthly_budget else 0.0
+
+    pareto_all=(
+        report_view.assign(subcategory=report_view['subcategory'].fillna('Sin detalle'))
+        .groupby('subcategory',as_index=False).amount.sum()
+        .sort_values('amount',ascending=False)
+    )
+    pareto_all['cum']=pareto_all.amount.cumsum()/report_spent if report_spent else 0
+    count_50=int((pareto_all['cum']<0.5).sum()+1) if not pareto_all.empty else 0
+
+    latest_month=max(report_months)
+    previous_months=[m for m in report_months if m<latest_month]
+    latest_total=float(report_view.loc[report_view.month==latest_month,'amount'].sum())
+    prev_total=float(report_view.loc[report_view.month==max(previous_months),'amount'].sum()) if previous_months else 0.0
+    latest_change=(latest_total/prev_total-1) if prev_total else None
+
+    i1,i2,i3,i4=st.columns(4)
+    i1.markdown(
+        f"<div class='insight'><b>{principal_cat}</b> representa "
+        f"<span class='report-neutral'>{principal_share:.1%}</span> del gasto seleccionado.</div>",
+        unsafe_allow_html=True
+    )
+    hm_class='report-bad' if highest_month_vs>0 else 'report-good'
+    i2.markdown(
+        f"<div class='insight'><b>{highest_month_name}</b> fue el mes de mayor gasto: "
+        f"<span class='{hm_class}'>{money(highest_month_value)}</span> "
+        f"({highest_month_vs:+.1%} vs presupuesto).</div>",
+        unsafe_allow_html=True
+    )
+    delta_class='report-bad' if report_delta>0 else 'report-good'
+    i3.markdown(
+        f"<div class='insight'>En el periodo estás "
+        f"<span class='{delta_class}'>{money(abs(report_delta))}</span> "
+        f"{'arriba' if report_delta>0 else 'debajo'} del presupuesto acumulado.</div>",
+        unsafe_allow_html=True
+    )
+    latest_text=(
+        f"{MONTHS[latest_month]} cambió {latest_change:+.1%} frente a {MONTHS[max(previous_months)]}."
+        if latest_change is not None else
+        f"{MONTHS[latest_month]} registra {money(latest_total)}."
+    )
+    i4.markdown(
+        f"<div class='insight'><b>{count_50}</b> subcategorías concentran aproximadamente el 50% del gasto. "
+        f"{latest_text}</div>",
+        unsafe_allow_html=True
+    )
 
 
 elif page=='Tendencias y fugas':
